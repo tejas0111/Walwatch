@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src", "../api/src/lib/event-bus.ts", "../api/src/lib/state-machine.ts", "../api/src/lib/policy-engine.ts", "../api/src/lib/cost-engine.ts", "../api/src/db/index.ts", "../api/src/config.ts", "../api/src/lib/errors.ts", "../api/src/db/schema.ts"],
+  "exclude": ["node_modules", "dist"]
+}

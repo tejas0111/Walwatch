@@ -1,0 +1,5200 @@
+openapi: 3.0.3
+info:
+  title: Walwatch Auto-Renewal Keeper API
+  description: API for managing blob auto-renewal on Walrus/Sui.
+  version: 0.1.0
+  contact:
+    name: Walwatch
+    url: https://walwatch.io
+
+servers:
+  - url: https://api.walwatch.io/api/v1
+    description: Production
+  - url: http://localhost:3001/api/v1
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+    AdminKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+
+  parameters:
+    OrgIdHeader:
+      name: X-Org-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Organization UUID for scoping requests
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Pagination cursor from previous response
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Maximum items per page
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+          properties:
+            message:
+              type: string
+            code:
+              type: string
+            failureClass:
+              type: string
+              enum: [persistent, transient, partial, systemic]
+            requestId:
+              type: string
+            details:
+              type: object
+
+    PaginationMeta:
+      type: object
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+
+    # ── Auth ──
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          nullable: true
+
+    AuthResponse:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        token:
+          type: string
+
+    RegisterInput:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        name:
+          type: string
+
+    LoginInput:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    # ── Organization ──
+    Organization:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        role:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateOrgInput:
+      type: object
+      required:
+        - name
+        - slug
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        slug:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+
+    OrgMember:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+        name:
+          type: string
+          nullable: true
+        role:
+          type: string
+        joinedAt:
+          type: string
+          format: date-time
+
+    # ── Project ──
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        environment:
+          type: string
+          nullable: true
+        environmentLabels:
+          type: array
+          items:
+            type: string
+        blobCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateProjectInput:
+      type: object
+      required:
+        - name
+        - slug
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+        environment:
+          type: string
+
+    # ── Blob Registration ──
+    BlobRegistration:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+          nullable: true
+        blobId:
+          type: string
+        name:
+          type: string
+          nullable: true
+        sizeBytes:
+          type: integer
+          nullable: true
+        contentType:
+          type: string
+          nullable: true
+        status:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        suiVaultId:
+          type: string
+          nullable: true
+        ownerAddress:
+          type: string
+          nullable: true
+        expiryEpoch:
+          type: integer
+          nullable: true
+        metadata:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateBlobInput:
+      type: object
+      required:
+        - projectId
+        - blobId
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        blobId:
+          type: string
+        name:
+          type: string
+        sizeBytes:
+          type: integer
+        contentType:
+          type: string
+        status:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        suiVaultId:
+          type: string
+        ownerAddress:
+          type: string
+
+    BulkBlobInput:
+      type: object
+      required:
+        - action
+        - ids
+      properties:
+        action:
+          type: string
+          enum: [archive, activate, delete]
+        ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    BulkBlobResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        processed:
+          type: integer
+        skipped:
+          type: integer
+
+    # ── Policy ──
+    Policy:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        rules:
+          type: array
+          items:
+            type: object
+        renewThreshold:
+          type: integer
+        renewExtension:
+          type: integer
+        maxTotalEpochs:
+          type: integer
+          nullable: true
+        active:
+          type: boolean
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyAssignment'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PolicyAssignment:
+      type: object
+      properties:
+        policyId:
+          type: string
+          format: uuid
+        blobRegistrationId:
+          type: string
+          format: uuid
+
+    CreatePolicyInput:
+      type: object
+      required:
+        - name
+        - renewThreshold
+        - renewExtension
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        rules:
+          type: array
+          items:
+            type: object
+        renewThreshold:
+          type: integer
+        renewExtension:
+          type: integer
+        maxTotalEpochs:
+          type: integer
+        active:
+          type: boolean
+          default: true
+
+    PolicyAssignInput:
+      type: object
+      required:
+        - blob_ids
+      properties:
+        blob_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    PolicyAssignResponse:
+      type: object
+      properties:
+        assigned:
+          type: integer
+
+    PolicyUnassignResponse:
+      type: object
+      properties:
+        unassigned:
+          type: integer
+
+    # ── Wallet ──
+    Wallet:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        label:
+          type: string
+          nullable: true
+        address:
+          type: string
+        type:
+          type: string
+          nullable: true
+        isDefault:
+          type: boolean
+        spendingLimit:
+          type: number
+          nullable: true
+        balance:
+          type: number
+        lastCheckedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateWalletInput:
+      type: object
+      required:
+        - address
+      properties:
+        address:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+        isDefault:
+          type: boolean
+        spendingLimit:
+          type: number
+
+    RefreshBalanceResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        balance:
+          type: number
+
+    # ── Notification Channel ──
+    NotificationChannel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        name:
+          type: string
+        config:
+          type: object
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateChannelInput:
+      type: object
+      required:
+        - type
+        - name
+        - config
+      properties:
+        type:
+          type: string
+        name:
+          type: string
+        config:
+          type: object
+        enabled:
+          type: boolean
+          default: true
+
+    # ── Alert Rule ──
+    AlertRule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        trigger:
+          type: string
+        conditions:
+          type: object
+          nullable: true
+        channelIds:
+          type: array
+          items:
+            type: string
+        projectIds:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateAlertRuleInput:
+      type: object
+      required:
+        - name
+        - trigger
+      properties:
+        name:
+          type: string
+        trigger:
+          type: string
+        conditions:
+          type: object
+        channelIds:
+          type: array
+          items:
+            type: string
+        projectIds:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+          default: true
+
+    # ── Alert Event ──
+    AlertEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        alertRuleId:
+          type: string
+          format: uuid
+          nullable: true
+        eventType:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+        status:
+          type: string
+        firedAt:
+          type: string
+          format: date-time
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledgedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── Analytics ──
+    AnalyticsOverview:
+      type: object
+      properties:
+        totalBlobs:
+          type: integer
+        activeBlobs:
+          type: integer
+        totalProjects:
+          type: integer
+        totalPolicies:
+          type: integer
+        totalWallets:
+          type: integer
+
+    AnalyticsStorage:
+      type: object
+      properties:
+        totalSizeBytes:
+          type: integer
+        averageSizeBytes:
+          type: number
+        blobCount:
+          type: integer
+        byStatus:
+          type: array
+          items:
+            type: object
+            properties:
+              status:
+                type: string
+              count:
+                type: integer
+              totalSize:
+                type: integer
+
+    AnalyticsCostResponse:
+      type: object
+      properties:
+        totalCost:
+          type: number
+        byPeriod:
+          type: array
+          items:
+            type: object
+            properties:
+              period:
+                type: string
+              cost:
+                type: number
+
+    AnalyticsForecastResponse:
+      type: object
+      properties:
+        projectedCost:
+          type: number
+        byPeriod:
+          type: array
+          items:
+            type: object
+            properties:
+              period:
+                type: string
+              projectedCost:
+                type: number
+
+    RenewalCountResponse:
+      type: object
+      properties:
+        totalRenewals:
+          type: integer
+
+    # ── Audit Log ──
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+          nullable: true
+        details:
+          type: object
+          nullable: true
+        ipAddress:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ── Activity Feed ──
+    ActivityFeedEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        actorType:
+          type: string
+          enum: [human, system, api_key]
+        actorId:
+          type: string
+          nullable: true
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+          nullable: true
+        summary:
+          type: string
+        details:
+          type: object
+          nullable: true
+        traceId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    ActivityFeedResponse:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityFeedEntry'
+        pagination:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    # ── Billing ──
+    Subscription:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        plan:
+          type: string
+        status:
+          type: string
+        currentPeriodStart:
+          type: string
+          format: date-time
+          nullable: true
+        currentPeriodEnd:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        subscriptionId:
+          type: string
+          format: uuid
+          nullable: true
+        amount:
+          type: number
+        currency:
+          type: string
+          nullable: true
+        status:
+          type: string
+        description:
+          type: string
+          nullable: true
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+        paidAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    UsageRecord:
+      type: object
+      properties:
+        metric:
+          type: string
+        total:
+          type: integer
+
+    # ── API Keys ──
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        prefix:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        rawKey:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateApiKeyInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    # ── Vault ──
+    Vault:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        walletAddress:
+          type: string
+        blobId:
+          type: string
+        status:
+          type: string
+        initialWalAmount:
+          type: string
+        remainingWalAmount:
+          type: string
+        renewThresholdEpochs:
+          type: integer
+        renewByEpochs:
+          type: integer
+        maxTotalEpochs:
+          type: integer
+          nullable: true
+        currentEpoch:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    VaultTransaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        txDigest:
+          type: string
+          nullable: true
+        status:
+          type: string
+        amount:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+
+    CreateVaultInput:
+      type: object
+      required:
+        - wallet_address
+        - blob_id
+        - initial_wal_amount
+        - renew_threshold_epochs
+        - renew_by_epochs
+      properties:
+        wallet_address:
+          type: string
+        blob_id:
+          type: string
+        initial_wal_amount:
+          type: string
+        renew_threshold_epochs:
+          type: integer
+        renew_by_epochs:
+          type: integer
+        max_total_epochs:
+          type: integer
+
+    VaultDepositInput:
+      type: object
+      required:
+        - wallet_address
+        - amount
+      properties:
+        wallet_address:
+          type: string
+        amount:
+          type: string
+
+    VaultWithdrawInput:
+      type: object
+      required:
+        - wallet_address
+        - amount
+      properties:
+        wallet_address:
+          type: string
+        amount:
+          type: string
+
+    VaultReclaimInput:
+      type: object
+      required:
+        - wallet_address
+      properties:
+        wallet_address:
+          type: string
+
+    VaultPolicyInput:
+      type: object
+      required:
+        - wallet_address
+        - renew_threshold_epochs
+        - renew_by_epochs
+        - active
+      properties:
+        wallet_address:
+          type: string
+        renew_threshold_epochs:
+          type: integer
+        renew_by_epochs:
+          type: integer
+        max_total_epochs:
+          type: integer
+        active:
+          type: boolean
+
+    VaultHistoryEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        vaultId:
+          type: string
+          format: uuid
+        action:
+          type: string
+        amount:
+          type: string
+          nullable: true
+        txDigest:
+          type: string
+          nullable: true
+        details:
+          type: object
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    VaultHistoryResponse:
+      type: object
+      properties:
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/VaultHistoryEntry'
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # ── Publisher ──
+    Publisher:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        endpoint:
+          type: string
+          nullable: true
+        walletAddress:
+          type: string
+          nullable: true
+        suiVaultId:
+          type: string
+          nullable: true
+        status:
+          type: string
+        lastHeartbeatAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreatePublisherInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        endpoint:
+          type: string
+        walletAddress:
+          type: string
+        suiVaultId:
+          type: string
+
+    # ── Aggregator ──
+    Aggregator:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        publisherId:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+        endpoint:
+          type: string
+          nullable: true
+        status:
+          type: string
+        lastHeartbeatAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateAggregatorInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        publisherId:
+          type: string
+          format: uuid
+        endpoint:
+          type: string
+
+    # ── Budget ──
+    Budget:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+        amount:
+          type: number
+        period:
+          type: string
+        spent:
+          type: number
+        currency:
+          type: string
+        status:
+          type: string
+        alertThreshold:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateBudgetInput:
+      type: object
+      required:
+        - name
+        - amount
+      properties:
+        name:
+          type: string
+        amount:
+          type: number
+        projectId:
+          type: string
+          format: uuid
+        period:
+          type: string
+        currency:
+          type: string
+        alertThreshold:
+          type: integer
+
+    # ── Spending Limit ──
+    SpendingLimit:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        walletId:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        amount:
+          type: number
+        period:
+          type: string
+        spent:
+          type: number
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateSpendingLimitInput:
+      type: object
+      required:
+        - walletId
+        - amount
+      properties:
+        walletId:
+          type: string
+          format: uuid
+        amount:
+          type: number
+        name:
+          type: string
+        period:
+          type: string
+
+    # ── Renewal Job ──
+    RenewalJob:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        blobRegistrationId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+        attempt:
+          type: integer
+        maxAttempts:
+          type: integer
+        lastError:
+          type: string
+          nullable: true
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ── Team ──
+    Team:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    TeamMember:
+      type: object
+      properties:
+        teamId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        role:
+          type: string
+        joinedAt:
+          type: string
+          format: date-time
+
+    CreateTeamInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+
+    AddTeamMemberInput:
+      type: object
+      required:
+        - userId
+      properties:
+        userId:
+          type: string
+          format: uuid
+        role:
+          type: string
+
+    # ── Invitation ──
+    Invitation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+        status:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateInvitationInput:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+
+    AcceptInvitationInput:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+
+    AcceptInvitationResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        orgId:
+          type: string
+          format: uuid
+        role:
+          type: string
+
+    # ── Schedule ──
+    Schedule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [system, user]
+        cronExpr:
+          type: string
+        lastRunAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastCompletedAt:
+          type: string
+          format: date-time
+          nullable: true
+        enabled:
+          type: boolean
+        config:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    # ── Webhook ──
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        failureCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateWebhookInput:
+      type: object
+      required:
+        - name
+        - url
+        - events
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+
+    # ── Dashboard ──
+    DashboardSummary:
+      type: object
+      properties:
+        blobsByHealth:
+          type: object
+          properties:
+            healthy:
+              type: integer
+            atRisk:
+              type: integer
+            expiring:
+              type: integer
+            expired:
+              type: integer
+        storageUnderManagement:
+          type: object
+          properties:
+            totalBytes:
+              type: integer
+            totalBlobs:
+              type: integer
+        recentSpend:
+          type: object
+          properties:
+            totalCost:
+              type: number
+            renewalCount:
+              type: integer
+            failedCount:
+              type: integer
+            blockedCount:
+              type: integer
+        budgetComparison:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              amount:
+                type: number
+              spent:
+                type: number
+              remaining:
+                type: number
+              crossed:
+                type: boolean
+        nextToExpire:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              blobId:
+                type: string
+              name:
+                type: string
+                nullable: true
+              expiryEpoch:
+                type: integer
+                nullable: true
+        needsAttention:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertEvent'
+
+    # ── Cost Engine ──
+    CostSimulateInput:
+      type: object
+      required:
+        - blobIds
+      properties:
+        blobIds:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          maxItems: 100
+        policyId:
+          type: string
+          format: uuid
+
+    CostSimulateResponse:
+      type: object
+      properties:
+        simulation:
+          type: boolean
+        estimate:
+          type: array
+          items:
+            type: object
+
+    # ── Admin ──
+    AdminHealth:
+      type: object
+      properties:
+        status:
+          type: string
+        queueDepth:
+          type: integer
+        pendingAlerts:
+          type: integer
+        activeSchedules:
+          type: integer
+        suiRpc:
+          type: string
+        suiEndpoints:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    AdminMetrics:
+      type: object
+      properties:
+        totalJobs:
+          type: integer
+        failedJobs:
+          type: integer
+        totalOrgs:
+          type: integer
+        activeOrgs:
+          type: integer
+        totalBlobs:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    AdminTriggerScanInput:
+      type: object
+      required:
+        - justification
+      properties:
+        justification:
+          type: string
+        orgId:
+          type: string
+          format: uuid
+
+    AdminRetryJobInput:
+      type: object
+      required:
+        - justification
+      properties:
+        justification:
+          type: string
+
+    AdminTenantResponse:
+      type: object
+      properties:
+        organization:
+          $ref: '#/components/schemas/Organization'
+        stats:
+          type: object
+          properties:
+            totalJobs:
+              type: integer
+            totalBlobs:
+              type: integer
+            activeSchedules:
+              type: integer
+            totalAlerts:
+              type: integer
+
+    QueueStatus:
+      type: object
+      properties:
+        status:
+          type: string
+        count:
+          type: integer
+
+    # ── Feature Flags ──
+    FeatureFlag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        enabled:
+          type: boolean
+        type:
+          type: string
+        orgIds:
+          type: array
+          items:
+            type: string
+          nullable: true
+        config:
+          type: object
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateFlagInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+          default: false
+        type:
+          type: string
+          default: release
+        config:
+          type: object
+
+    FlagCheckResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        isActiveForOrg:
+          type: boolean
+        orgId:
+          type: string
+          nullable: true
+
+    # ── Experiments ──
+    CreateExperimentInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        description:
+          type: string
+        variants:
+          type: array
+          items:
+            type: string
+        targetingRules:
+          type: object
+
+    UpdateExperimentInput:
+      type: object
+      properties:
+        description:
+          type: string
+        variants:
+          type: array
+          items:
+            type: string
+        targetingRules:
+          type: object
+
+    ExperimentListResponse:
+      type: object
+      properties:
+        experiments:
+          type: array
+          items:
+            type: string
+
+    ExperimentResponse:
+      type: object
+      properties:
+        experimentName:
+          type: string
+        assignments:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              experimentName:
+                type: string
+              orgId:
+                type: string
+              variant:
+                type: string
+              assignedAt:
+                type: string
+                format: date-time
+
+    ExperimentAssignInput:
+      type: object
+      required:
+        - orgId
+        - variant
+      properties:
+        orgId:
+          type: string
+          format: uuid
+        variant:
+          type: string
+
+    ExperimentVariantResponse:
+      type: object
+      properties:
+        experimentName:
+          type: string
+        variant:
+          type: string
+          nullable: true
+        assigned:
+          type: boolean
+
+    # ── Page/Offset Pagination ──
+    PaginatedBlobResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlobRegistration'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+paths:
+  # ── Auth ──
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterInput'
+      responses:
+        '201':
+          description: User registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out current session
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current authenticated user
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+
+  # ── Organizations ──
+  /orgs:
+    get:
+      tags: [Organizations]
+      summary: List organizations
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: List of organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Organization'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+    post:
+      tags: [Organizations]
+      summary: Create organization
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrgInput'
+      responses:
+        '201':
+          description: Organization created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization:
+                    $ref: '#/components/schemas/Organization'
+
+  /orgs/{id}:
+    get:
+      tags: [Organizations]
+      summary: Get organization
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization:
+                    $ref: '#/components/schemas/Organization'
+    patch:
+      tags: [Organizations]
+      summary: Update organization
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrgInput'
+      responses:
+        '200':
+          description: Organization updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization:
+                    $ref: '#/components/schemas/Organization'
+    delete:
+      tags: [Organizations]
+      summary: Delete organization
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /orgs/{id}/restore:
+    post:
+      tags: [Organizations]
+      summary: Restore organization
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization restored
+
+  /orgs/{id}/suspend:
+    post:
+      tags: [Organizations]
+      summary: Suspend organization
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization suspended
+
+  /orgs/{id}/unsuspend:
+    post:
+      tags: [Organizations]
+      summary: Unsuspend organization
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization unsuspended
+
+  /orgs/{id}/members:
+    get:
+      tags: [Organizations]
+      summary: List organization members
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: List of members
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrgMember'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+    post:
+      tags: [Organizations]
+      summary: Add organization member
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - role
+              properties:
+                email:
+                  type: string
+                  format: email
+                role:
+                  type: string
+                  enum: [admin, member, viewer]
+      responses:
+        '201':
+          description: Member added
+
+  /orgs/{id}/members/{userId}:
+    patch:
+      tags: [Organizations]
+      summary: Update member role
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - role
+              properties:
+                role:
+                  type: string
+                  enum: [owner, admin, member, viewer]
+      responses:
+        '200':
+          description: Role updated
+    delete:
+      tags: [Organizations]
+      summary: Remove organization member
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Member removed
+
+  /orgs/{id}/audit-logs:
+    get:
+      tags: [Organizations]
+      summary: Get audit logs for organization
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: Audit logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auditLogs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  # ── Projects ──
+  /projects:
+    get:
+      tags: [Projects]
+      summary: List projects
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+    post:
+      tags: [Projects]
+      summary: Create project
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectInput'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+
+  /projects/{projectId}:
+    get:
+      tags: [Projects]
+      summary: Get project
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+    patch:
+      tags: [Projects]
+      summary: Update project
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+    delete:
+      tags: [Projects]
+      summary: Delete project
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project deleted
+
+  /projects/{projectId}/blobs:
+    get:
+      tags: [Projects]
+      summary: List blobs in project
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Paginated blobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedBlobResponse'
+
+  # ── Blobs ──
+  /blobs:
+    get:
+      tags: [Blobs]
+      summary: List blob registrations
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: project_id
+          in: query
+          schema:
+            type: string
+        - name: tag
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Paginated blobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedBlobResponse'
+    post:
+      tags: [Blobs]
+      summary: Register blob
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBlobInput'
+      responses:
+        '201':
+          description: Blob registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobRegistration'
+
+  /blobs/bulk:
+    post:
+      tags: [Blobs]
+      summary: Bulk blob action
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkBlobInput'
+      responses:
+        '200':
+          description: Bulk action result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkBlobResponse'
+
+  /blobs/export:
+    get:
+      tags: [Blobs]
+      summary: Export all blobs
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: All blob registrations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  blobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BlobRegistration'
+
+  /blobs/{blobId}:
+    get:
+      tags: [Blobs]
+      summary: Get blob registration
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Blob registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobRegistration'
+    patch:
+      tags: [Blobs]
+      summary: Update blob registration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Blob updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobRegistration'
+    delete:
+      tags: [Blobs]
+      summary: Delete blob registration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Blob deleted
+
+  # ── Policies ──
+  /policies:
+    get:
+      tags: [Policies]
+      summary: List policies
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of policies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Policy'
+    post:
+      tags: [Policies]
+      summary: Create policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyInput'
+      responses:
+        '201':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+
+  /policies/{policyId}:
+    get:
+      tags: [Policies]
+      summary: Get policy
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+    patch:
+      tags: [Policies]
+      summary: Update policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+    delete:
+      tags: [Policies]
+      summary: Delete policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy deleted
+
+  /policies/{policyId}/assign:
+    post:
+      tags: [Policies]
+      summary: Assign policy to blobs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyAssignInput'
+      responses:
+        '200':
+          description: Policy assigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyAssignResponse'
+
+  /policies/{policyId}/unassign:
+    post:
+      tags: [Policies]
+      summary: Unassign policy from blobs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyAssignInput'
+      responses:
+        '200':
+          description: Policy unassigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyUnassignResponse'
+
+  /policies/{policyId}/pause:
+    post:
+      tags: [Policies]
+      summary: Pause policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy paused
+
+  /policies/{policyId}/activate:
+    post:
+      tags: [Policies]
+      summary: Activate policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy activated
+
+  /policies/{policyId}/archive:
+    post:
+      tags: [Policies]
+      summary: Archive policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy archived
+
+  # ── Wallets ──
+  /wallets:
+    get:
+      tags: [Wallets]
+      summary: List wallets
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of wallets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  wallets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Wallet'
+    post:
+      tags: [Wallets]
+      summary: Create wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWalletInput'
+      responses:
+        '201':
+          description: Wallet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+
+  /wallets/{walletId}:
+    get:
+      tags: [Wallets]
+      summary: Get wallet
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+    patch:
+      tags: [Wallets]
+      summary: Update wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Wallet updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+    delete:
+      tags: [Wallets]
+      summary: Delete wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet deleted
+
+  /wallets/{walletId}/refresh-balance:
+    post:
+      tags: [Wallets]
+      summary: Refresh wallet balance
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Balance refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshBalanceResponse'
+
+  /wallets/{walletId}/suspend:
+    post:
+      tags: [Wallets]
+      summary: Suspend wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet suspended
+
+  /wallets/{walletId}/unsuspend:
+    post:
+      tags: [Wallets]
+      summary: Unsuspend wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet unsuspended
+
+  /wallets/{walletId}/restore:
+    post:
+      tags: [Wallets]
+      summary: Restore wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet restored
+
+  /wallets/{walletId}/revoke-delegation:
+    post:
+      tags: [Wallets]
+      summary: Revoke wallet delegation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Delegation revoked
+
+  /wallets/{walletId}/reconnect:
+    post:
+      tags: [Wallets]
+      summary: Reconnect wallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: walletId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wallet reconnected
+
+  # ── Alerts ──
+  /alerts/channels:
+    get:
+      tags: [Alerts]
+      summary: List notification channels
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of channels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NotificationChannel'
+    post:
+      tags: [Alerts]
+      summary: Create notification channel
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelInput'
+      responses:
+        '201':
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+
+  /alerts/channels/{channelId}:
+    get:
+      tags: [Alerts]
+      summary: Get notification channel
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Channel details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+    patch:
+      tags: [Alerts]
+      summary: Update notification channel
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Channel updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+    delete:
+      tags: [Alerts]
+      summary: Delete notification channel
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Channel deleted
+
+  /alerts/rules:
+    get:
+      tags: [Alerts]
+      summary: List alert rules
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of alert rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AlertRule'
+    post:
+      tags: [Alerts]
+      summary: Create alert rule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAlertRuleInput'
+      responses:
+        '201':
+          description: Alert rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+
+  /alerts/rules/{ruleId}:
+    get:
+      tags: [Alerts]
+      summary: Get alert rule
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: ruleId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Alert rule details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+    patch:
+      tags: [Alerts]
+      summary: Update alert rule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: ruleId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Alert rule updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+    delete:
+      tags: [Alerts]
+      summary: Delete alert rule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: ruleId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Alert rule deleted
+
+  # ── Analytics ──
+  /analytics/overview:
+    get:
+      tags: [Analytics]
+      summary: Get analytics overview
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Analytics overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsOverview'
+
+  /analytics/storage:
+    get:
+      tags: [Analytics]
+      summary: Get storage analytics
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Storage analytics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsStorage'
+
+  /analytics/renewals:
+    get:
+      tags: [Analytics]
+      summary: Get renewal count
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Renewal count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalCountResponse'
+
+  /analytics/costs:
+    get:
+      tags: [Analytics]
+      summary: Get cost analytics
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Cost analytics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsCostResponse'
+
+  /analytics/forecasts:
+    get:
+      tags: [Analytics]
+      summary: Get cost forecast
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Cost forecast
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsForecastResponse'
+
+  # ── Audit Logs ──
+  /audit-logs:
+    get:
+      tags: [Audit Logs]
+      summary: Get audit logs
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Audit logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auditLogs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+
+  # ── Activity Feed ──
+  /activity-feed:
+    get:
+      tags: [Activity Feed]
+      summary: Get activity feed
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: actor_type
+          in: query
+          schema:
+            type: string
+            enum: [human, system, api_key]
+      responses:
+        '200':
+          description: Activity feed entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityFeedResponse'
+
+  # ── Billing ──
+  /billing/subscription:
+    get:
+      tags: [Billing]
+      summary: Get subscription
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Current subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+    post:
+      tags: [Billing]
+      summary: Create or update subscription
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - plan
+              properties:
+                plan:
+                  type: string
+      responses:
+        '200':
+          description: Subscription created/updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /billing/invoices:
+    get:
+      tags: [Billing]
+      summary: List invoices
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of invoices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invoice'
+
+  /billing/usage:
+    get:
+      tags: [Billing]
+      summary: Get usage records
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: Usage records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usage:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UsageRecord'
+
+  # ── API Keys ──
+  /api-keys:
+    get:
+      tags: [API Keys]
+      summary: List API keys
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apiKeys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKey'
+    post:
+      tags: [API Keys]
+      summary: Create API key
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyInput'
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+
+  /api-keys/{keyId}:
+    delete:
+      tags: [API Keys]
+      summary: Delete API key
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: API key deleted
+
+  # ── Vaults ──
+  /vaults:
+    post:
+      tags: [Vaults]
+      summary: Create vault
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVaultInput'
+      responses:
+        '201':
+          description: Vault created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultTransaction'
+
+  /vaults/{walletAddress}:
+    get:
+      tags: [Vaults]
+      summary: Get vaults by wallet
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Vaults for wallet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vaults:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Vault'
+
+  /vaults/{vaultId}/deposit:
+    post:
+      tags: [Vaults]
+      summary: Deposit to vault
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultDepositInput'
+      responses:
+        '200':
+          description: Deposit successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultTransaction'
+
+  /vaults/{vaultId}/policy:
+    post:
+      tags: [Vaults]
+      summary: Update vault policy
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultPolicyInput'
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultTransaction'
+
+  /vaults/{vaultId}/withdraw:
+    post:
+      tags: [Vaults]
+      summary: Withdraw from vault
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultWithdrawInput'
+      responses:
+        '200':
+          description: Withdrawal successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultTransaction'
+
+  /vaults/{vaultId}/reclaim:
+    post:
+      tags: [Vaults]
+      summary: Reclaim vault
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultReclaimInput'
+      responses:
+        '200':
+          description: Vault reclaimed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultTransaction'
+
+  /vaults/{vaultId}/history:
+    get:
+      tags: [Vaults]
+      summary: Get vault transaction history
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Vault history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultHistoryResponse'
+
+  # ── Publishers ──
+  /publishers:
+    get:
+      tags: [Publishers]
+      summary: List publishers
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of publishers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  publishers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Publisher'
+    post:
+      tags: [Publishers]
+      summary: Create publisher
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePublisherInput'
+      responses:
+        '201':
+          description: Publisher created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Publisher'
+
+  /publishers/{id}:
+    get:
+      tags: [Publishers]
+      summary: Get publisher
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Publisher details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Publisher'
+    patch:
+      tags: [Publishers]
+      summary: Update publisher
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Publisher updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Publisher'
+    delete:
+      tags: [Publishers]
+      summary: Delete publisher
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Publisher deleted
+
+  /publishers/{id}/heartbeat:
+    post:
+      tags: [Publishers]
+      summary: Publisher heartbeat
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Heartbeat recorded
+
+  # ── Aggregators ──
+  /aggregators:
+    get:
+      tags: [Aggregators]
+      summary: List aggregators
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of aggregators
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  aggregators:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Aggregator'
+    post:
+      tags: [Aggregators]
+      summary: Create aggregator
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAggregatorInput'
+      responses:
+        '201':
+          description: Aggregator created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Aggregator'
+
+  /aggregators/{id}:
+    get:
+      tags: [Aggregators]
+      summary: Get aggregator
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Aggregator details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Aggregator'
+    patch:
+      tags: [Aggregators]
+      summary: Update aggregator
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Aggregator updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Aggregator'
+    delete:
+      tags: [Aggregators]
+      summary: Delete aggregator
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Aggregator deleted
+
+  /aggregators/{id}/heartbeat:
+    post:
+      tags: [Aggregators]
+      summary: Aggregator heartbeat
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Heartbeat recorded
+
+  # ── Budgets ──
+  /budgets:
+    get:
+      tags: [Budgets]
+      summary: List budgets
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of budgets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  budgets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Budget'
+    post:
+      tags: [Budgets]
+      summary: Create budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBudgetInput'
+      responses:
+        '201':
+          description: Budget created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+
+  /budgets/{id}:
+    get:
+      tags: [Budgets]
+      summary: Get budget
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Budget details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+    patch:
+      tags: [Budgets]
+      summary: Update budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Budget updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+    delete:
+      tags: [Budgets]
+      summary: Delete budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Budget deleted
+
+  /budgets/{id}/pause:
+    post:
+      tags: [Budgets]
+      summary: Pause budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Budget paused
+
+  /budgets/{id}/activate:
+    post:
+      tags: [Budgets]
+      summary: Activate budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Budget activated
+
+  /budgets/{id}/archive:
+    post:
+      tags: [Budgets]
+      summary: Archive budget
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Budget archived
+
+  # ── Spending Limits ──
+  /spending-limits:
+    get:
+      tags: [Spending Limits]
+      summary: List spending limits
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of spending limits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  spendingLimits:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SpendingLimit'
+    post:
+      tags: [Spending Limits]
+      summary: Create spending limit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSpendingLimitInput'
+      responses:
+        '201':
+          description: Spending limit created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpendingLimit'
+
+  /spending-limits/{id}:
+    get:
+      tags: [Spending Limits]
+      summary: Get spending limit
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Spending limit details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpendingLimit'
+    patch:
+      tags: [Spending Limits]
+      summary: Update spending limit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Spending limit updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpendingLimit'
+    delete:
+      tags: [Spending Limits]
+      summary: Delete spending limit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Spending limit deleted
+
+  # ── Teams ──
+  /teams:
+    get:
+      tags: [Teams]
+      summary: List teams
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of teams
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  teams:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+    post:
+      tags: [Teams]
+      summary: Create team
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamInput'
+      responses:
+        '201':
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+
+  /teams/{id}:
+    get:
+      tags: [Teams]
+      summary: Get team
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Team with members
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Team'
+                  - type: object
+                    properties:
+                      members:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TeamMember'
+    patch:
+      tags: [Teams]
+      summary: Update team
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Team updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+    delete:
+      tags: [Teams]
+      summary: Delete team
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Team deleted
+
+  /teams/{teamId}/members:
+    post:
+      tags: [Teams]
+      summary: Add team member
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddTeamMemberInput'
+      responses:
+        '201':
+          description: Team member added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamMember'
+
+  /teams/{teamId}/members/{userId}:
+    delete:
+      tags: [Teams]
+      summary: Remove team member
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Team member removed
+
+  # ── Invitations ──
+  /invitations:
+    get:
+      tags: [Invitations]
+      summary: List invitations
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of invitations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invitations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invitation'
+    post:
+      tags: [Invitations]
+      summary: Create invitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvitationInput'
+      responses:
+        '201':
+          description: Invitation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+
+  /invitations/accept:
+    post:
+      tags: [Invitations]
+      summary: Accept invitation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationInput'
+      responses:
+        '200':
+          description: Invitation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptInvitationResponse'
+
+  /invitations/{id}:
+    delete:
+      tags: [Invitations]
+      summary: Cancel invitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Invitation cancelled
+
+  # ── Renewal Jobs ──
+  /renewal-jobs:
+    get:
+      tags: [Renewal Jobs]
+      summary: List renewal jobs
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of renewal jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  renewalJobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RenewalJob'
+
+  /renewal-jobs/{id}:
+    get:
+      tags: [Renewal Jobs]
+      summary: Get renewal job
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Renewal job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalJob'
+
+  /renewal-jobs/{id}/retry:
+    post:
+      tags: [Renewal Jobs]
+      summary: Retry renewal job
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job retry enqueued
+
+  /renewal-jobs/{id}/cancel:
+    post:
+      tags: [Renewal Jobs]
+      summary: Cancel renewal job
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job cancelled
+
+  # ── Cost Engine ──
+  /cost-engine/simulate:
+    post:
+      tags: [Cost Engine]
+      summary: Simulate renewal costs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CostSimulateInput'
+      responses:
+        '200':
+          description: Cost simulation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostSimulateResponse'
+
+  # ── Webhooks ──
+  /webhooks:
+    get:
+      tags: [Webhooks]
+      summary: List webhooks
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      responses:
+        '200':
+          description: List of webhooks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Webhook'
+    post:
+      tags: [Webhooks]
+      summary: Create webhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookInput'
+      responses:
+        '201':
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+
+  /webhooks/{id}:
+    patch:
+      tags: [Webhooks]
+      summary: Update webhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+    delete:
+      tags: [Webhooks]
+      summary: Delete webhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Webhook deleted
+
+  /webhooks/{id}/test:
+    post:
+      tags: [Webhooks]
+      summary: Test webhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Webhook test result
+
+  # ── Alert Events ──
+  /alert-events:
+    get:
+      tags: [Alert Events]
+      summary: List alert events
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of alert events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlertEvent'
+
+  /alert-events/{id}/acknowledge:
+    post:
+      tags: [Alert Events]
+      summary: Acknowledge alert event
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Alert event acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertEvent'
+
+  # ── Schedules ──
+  /schedules:
+    get:
+      tags: [Schedules]
+      summary: List schedules
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [system, user]
+      responses:
+        '200':
+          description: List of schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Schedule'
+    post:
+      tags: [Schedules]
+      summary: Create schedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+
+  /schedules/{id}:
+    patch:
+      tags: [Schedules]
+      summary: Update schedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Schedule updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+    delete:
+      tags: [Schedules]
+      summary: Delete schedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Schedule deleted
+
+  # ── Dashboard ──
+  /dashboard/summary:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard summary
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrgIdHeader'
+        - name: projectId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSummary'
+
+  # ── Admin ──
+  /admin/health:
+    get:
+      tags: [Admin]
+      summary: Admin health check
+      security:
+        - AdminKeyAuth: []
+      responses:
+        '200':
+          description: Admin health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminHealth'
+
+  /admin/metrics:
+    get:
+      tags: [Admin]
+      summary: Get admin metrics
+      security:
+        - AdminKeyAuth: []
+      responses:
+        '200':
+          description: Admin metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminMetrics'
+
+  /admin/queues:
+    get:
+      tags: [Admin]
+      summary: Get queue status
+      security:
+        - AdminKeyAuth: []
+      responses:
+        '200':
+          description: Queue statuses
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queues:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/QueueStatus'
+
+  /admin/trigger-scan:
+    post:
+      tags: [Admin]
+      summary: Trigger scan
+      security:
+        - AdminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminTriggerScanInput'
+      responses:
+        '200':
+          description: Scan triggered
+
+  /admin/retry-job/{id}:
+    post:
+      tags: [Admin]
+      summary: Admin retry renewal job
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRetryJobInput'
+      responses:
+        '200':
+          description: Job retry enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  job:
+                    $ref: '#/components/schemas/RenewalJob'
+
+  /admin/tenants/{orgId}:
+    get:
+      tags: [Admin]
+      summary: Get tenant details
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: orgId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTenantResponse'
+
+  /admin/encryption/rotate-key:
+    post:
+      tags: [Admin]
+      summary: Rotate encryption key
+      security:
+        - AdminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - justification
+              properties:
+                justification:
+                  type: string
+      responses:
+        '200':
+          description: Key rotation result
+
+  # ── Feature Flags ──
+  /admin/flags:
+    get:
+      tags: [Feature Flags]
+      summary: List feature flags
+      security:
+        - AdminKeyAuth: []
+      responses:
+        '200':
+          description: List of feature flags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flags:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FeatureFlag'
+    post:
+      tags: [Feature Flags]
+      summary: Create feature flag
+      security:
+        - AdminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFlagInput'
+      responses:
+        '201':
+          description: Feature flag created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureFlag'
+
+  /admin/flags/{id}:
+    patch:
+      tags: [Feature Flags]
+      summary: Update feature flag
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Feature flag updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureFlag'
+    delete:
+      tags: [Feature Flags]
+      summary: Delete feature flag
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Feature flag deleted
+
+  /admin/flags/{id}/check:
+    get:
+      tags: [Feature Flags]
+      summary: Check feature flag
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: orgId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Feature flag check
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlagCheckResponse'
+
+  # ── Experiments ──
+  /experiments:
+    get:
+      tags: [Experiments]
+      summary: List experiments
+      security:
+        - AdminKeyAuth: []
+      responses:
+        '200':
+          description: List of experiment names
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExperimentListResponse'
+
+  /experiments/{name}:
+    get:
+      tags: [Experiments]
+      summary: Get experiment assignments
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Experiment details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExperimentResponse'
+
+  /experiments/{name}/assign:
+    post:
+      tags: [Experiments]
+      summary: Assign organization to experiment
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExperimentAssignInput'
+      responses:
+        '201':
+          description: Assignment created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  experimentName:
+                    type: string
+                  orgId:
+                    type: string
+                  variant:
+                    type: string
+                  assignedAt:
+                    type: string
+                    format: date-time
+
+  /experiments/{name}/variant:
+    get:
+      tags: [Experiments]
+      summary: Get variant for current org
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current variant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExperimentVariantResponse'
+
+  # ── Health ──
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  uptime:
+                    type: number
+                  version:
+                    type: string
+                  db:
+                    type: string
+                  suiRpc:
+                    type: string
+                  keeper:
+                    type: string
+
+components:
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Resource conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
