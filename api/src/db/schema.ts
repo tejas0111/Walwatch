@@ -367,6 +367,7 @@ export const budgets = pgTable('budgets', {
   windowStart: timestamp('window_start', { withTimezone: true }).defaultNow().notNull(),
   windowEnd: timestamp('window_end', { withTimezone: true }),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });

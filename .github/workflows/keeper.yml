@@ -1,0 +1,18 @@
+name: Keeper
+permissions:
+  contents: read
+on:
+  push: { branches: [main], paths: ['keeper/**'] }
+  pull_request: { paths: ['keeper/**'] }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+        working-directory: keeper
+      - run: npx tsc --noEmit
+        working-directory: keeper
+      - run: npx vitest run
+        working-directory: keeper

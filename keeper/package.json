@@ -15,7 +15,8 @@
     "@mysten/sui": "^1.0.0",
     "@mysten/walrus": "^0.1.0",
     "pino": "^8.0.0",
-    "node-cron": "^3.0.0"
+    "node-cron": "^3.0.0",
+    "postgres": "^3.4.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
