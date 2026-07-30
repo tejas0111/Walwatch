@@ -67,6 +67,10 @@ module auto_renewal::vault {
     /// Maximum epochs to renew in a single call (safety cap on fee arithmetic).
     const MAX_RENEW_EPOCHS_PER_CALL: u64 = 365;
 
+    /// Maximum allowed withdraw delay in epochs (~2.7 years at 1h/epoch).
+    /// Prevents beneficiary from locking funds for unreasonable durations.
+    const MAX_WITHDRAW_DELAY_EPOCHS: u64 = 1000;
+
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
     const CONTRACT_VERSION: u64 = 3;
@@ -126,6 +130,18 @@ module auto_renewal::vault {
     const EInvalidAction: u64 = 20;
     /// An admin action is already pending
     const EPendingActionExists: u64 = 21;
+    /// max_total_epochs must exceed current blob end_epoch
+    const EMaxEpochsNotExceeded: u64 = 22;
+    /// max_total_epochs exceeds MAX_TOTAL_EPOCHS
+    const EMaxEpochsTooHigh: u64 = 23;
+    /// renew_by_epochs must be > 0
+    const EInvalidRenewByEpochs: u64 = 24;
+    /// upgrade package address mismatch
+    const EUpgradeCapMismatch: u64 = 25;
+    /// admin delay < MIN_ADMIN_DELAY_EPOCHS
+    const EAdminDelayTooLow: u64 = 26;
+    /// withdraw_delay_epochs exceeds MAX_WITHDRAW_DELAY
+    const EMaxWithdrawDelayExceeded: u64 = 27;
 
     // ============================================================================
     // Structs
@@ -314,6 +330,10 @@ module auto_renewal::vault {
         operator: address,
     }
 
+    public struct PauserCapRevoked has copy, drop {
+        revoked_by: address,
+    }
+
     public struct StoragePriceUpdated has copy, drop {
         new_price_per_epoch: u64,
     }
@@ -392,7 +412,7 @@ module auto_renewal::vault {
             assert!(value_u64 <= MAX_PROTOCOL_FEE_BPS, EInvalidFeeBps);
         };
         if (action == ACTION_SET_ADMIN_DELAY) {
-            assert!(value_u64 >= MIN_ADMIN_DELAY_EPOCHS, 0);
+            assert!(value_u64 >= MIN_ADMIN_DELAY_EPOCHS, EAdminDelayTooLow);
         };
 
         let current_epoch = tx_context::epoch(ctx);
@@ -477,6 +497,7 @@ module auto_renewal::vault {
     /// in an emergency, but this also means a compromised operator can
     /// immediately halt the system. The unpause action is likewise instant.
     /// Requires PauserCap (held by the designated operator).
+    /// To revoke a PauserCap, use revoke_pauser() (requires AdminCap).
     entry fun emergency_pause(
         _cap: &PauserCap,
         config: &mut FeeConfig,
@@ -487,12 +508,32 @@ module auto_renewal::vault {
 
     /// Unpause the system — restores all vault operations.
     /// Requires PauserCap (held by the designated operator).
+    /// To revoke a PauserCap, use revoke_pauser() (requires AdminCap).
     entry fun emergency_unpause(
         _cap: &PauserCap,
         config: &mut FeeConfig,
     ) {
         config.paused = false;
         event::emit(Unpaused { });
+    }
+
+    /// Revoke a PauserCap — requires AdminCap.
+    /// Destroys the PauserCap, preventing further pause/unpause until a
+    /// new one is issued via the timelock (ACTION_SET_PAUSER).
+    /// This is NOT timelocked because revoking a compromised operator's
+    /// cap must be instantaneous to be effective in an emergency.
+    entry fun revoke_pauser(
+        _admin: &AdminCap,
+        cap: PauserCap,
+        ctx: &TxContext,
+    ) {
+        let operator = tx_context::sender(ctx);
+        let PauserCap { id } = cap;
+        id.delete();
+
+        event::emit(PauserCapRevoked {
+            revoked_by: operator,
+        });
     }
 
     // ============================================================================
@@ -523,8 +564,9 @@ module auto_renewal::vault {
     ) {
         assert_not_paused(config);
         let current_epoch = tx_context::epoch(ctx);
-        assert!(max_total_epochs > (blob.end_epoch() as u64), 0); // must extend past current end
-        assert!(max_total_epochs <= MAX_TOTAL_EPOCHS, 0);
+        assert!(max_total_epochs > (blob.end_epoch() as u64), EMaxEpochsNotExceeded); // must extend past current end
+        assert!(max_total_epochs <= MAX_TOTAL_EPOCHS, EMaxEpochsTooHigh);
+        assert!(withdraw_delay_epochs <= MAX_WITHDRAW_DELAY_EPOCHS, EMaxWithdrawDelayExceeded);
         assert!(beneficiary != @0x0, EInvalidAddress);
         let blob_id = blob.blob_id();
 
@@ -586,8 +628,8 @@ module auto_renewal::vault {
     ) {
         assert_not_paused(config);
         assert!(tx_context::sender(ctx) == vault.beneficiary, ENotBeneficiary);
-        assert!(new_policy.max_total_epochs <= MAX_TOTAL_EPOCHS, 0);
-        assert!(new_policy.renew_by_epochs > 0, 0);
+        assert!(new_policy.max_total_epochs <= MAX_TOTAL_EPOCHS, EMaxEpochsTooHigh);
+        assert!(new_policy.renew_by_epochs > 0, EInvalidRenewByEpochs);
         vault.policy = new_policy;
 
         event::emit(PolicyUpdated {
@@ -689,6 +731,9 @@ module auto_renewal::vault {
     /// Beneficiary only. Transfers the blob back and deactivates the policy.
     /// Policy deactivation here is intentional — reclaim implies the
     /// beneficiary no longer wants automated renewals.
+    /// NOTE: This function intentionally does NOT check assert_not_paused,
+    /// because users must always be able to exit (reclaim their blob) even
+    /// during a pause. This is a deliberate user-exit safety property.
     entry fun reclaim_blob(
         vault: &mut RenewalVault,
         ctx: &mut TxContext
@@ -717,6 +762,8 @@ module auto_renewal::vault {
     /// Beneficiary only. Used during contract migration periods and for
     /// users who want to transfer vault ownership (e.g., zkLogin → hardware wallet).
     /// Emits a VaultMigrated event.
+    /// NOTE: This function intentionally does NOT check assert_not_paused —
+    /// migration is a user-exit path that must work even during emergencies.
     entry fun migrate_vault(
         vault: &mut RenewalVault,
         new_beneficiary: address,
@@ -739,6 +786,8 @@ module auto_renewal::vault {
     /// Cancel a pending withdrawal. The beneficiary can use this to reset
     /// the pending state if they change their mind or need to recover from
     /// a stuck state (e.g., insufficient balance after renewal).
+    /// NOTE: This function intentionally does NOT check assert_not_paused —
+    /// cancelling a pending withdrawal is a user-exit path.
     entry fun cancel_pending_withdraw(
         vault: &mut RenewalVault,
         ctx: &mut TxContext
@@ -803,7 +852,7 @@ module auto_renewal::vault {
         assert!(vault.policy.active, ENotActive);
         assert!(vault.blob.is_some(), EBlobNotFound);
 
-        let current_epoch = system::epoch(system);
+        let current_epoch = tx_context::epoch(ctx);
         let end_epoch = vault.blob.borrow().end_epoch();
 
         // 2. Check if renewal is actually due
@@ -1085,7 +1134,7 @@ module auto_renewal::vault {
         // Verify the UpgradeCap actually belongs to this package.
         // The Sui framework already enforces this, but the explicit
         // check provides defense in depth against misconfigured upgrades.
-        assert!(sui::package::upgrade_package(upgrade_cap).to_address() == @auto_renewal, 0);
+        assert!(sui::package::upgrade_package(upgrade_cap).to_address() == @auto_renewal, EUpgradeCapMismatch);
 
         // Handle migration from previous versions
         if (config.version < CONTRACT_VERSION) {

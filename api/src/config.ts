@@ -54,4 +54,20 @@ export const config = {
   appSaltSecret: process.env.APP_SALT_SECRET || '',
   /** Fee config cache TTL in milliseconds (default 5 min). */
   feeConfigCacheTtlMs: parseInt(process.env.FEE_CONFIG_CACHE_TTL_MS || '300000', 10),
+  /**
+   * Gas wallet minimum balance threshold in MIST.
+   * When primary balance drops below this, status changes to 'LOW'.
+   * Default: 10 SUI (10_000_000_000 MIST).
+   */
+  gasWalletMinBalanceMist: (() => {
+    const raw = process.env.GAS_WALLET_MIN_BALANCE_MIST || '10000000000';
+    try { return BigInt(raw); } catch { return BigInt('10000000000'); }
+  })(),
+  /**
+   * JWT key ID for key rotation support.
+   * Increment to rotate signing keys. Old tokens with different kid
+   * will still validate if kid is in the known rotation history.
+   * Set to empty string (default) to omit kid from header.
+   */
+  jwtKeyId: process.env.JWT_KEY_ID || '',
 };

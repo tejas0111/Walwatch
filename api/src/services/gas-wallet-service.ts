@@ -56,7 +56,7 @@ export async function checkBalance(): Promise<{ primary: bigint; standby: bigint
     if (!sk) return BigInt(0);
     return client.getBalance({ owner: sk.toSuiAddress() }).then(r => BigInt(r.totalBalance));
   })();
-  const status = BigInt(primary.totalBalance) < BigInt(10_000_000_000) ? 'LOW' : 'OK';
+  const status = BigInt(primary.totalBalance) < config.gasWalletMinBalanceMist ? 'LOW' : 'OK';
   return { primary: BigInt(primary.totalBalance), standby: BigInt(await standbyBalance), status };
 }
 
