@@ -159,31 +159,35 @@ async function signAndSubmitTx(
 
       const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
       const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
-      const gasCoinId = await selectGasCoin(gasWalletKp.toSuiAddress());
-      tx.setGasPayment([{ objectId: gasCoinId, version: '0', digest: '' }]);
+      const gasWalletAddress = gasWalletKp.toSuiAddress();
 
-      const bytes = await pool.call(async (client) => tx.build({ client }));
+      return withAddressLock(gasWalletAddress, async () => {
+        const gasRef = await selectGasCoin(gasWalletAddress);
+        tx.setGasPayment([gasRef]);
 
-      const userSig = (await keypair.signTransaction(bytes)).signature;
+        const bytes = await pool.call(async (client) => tx.build({ client }));
 
-      const zkLoginSig = getZkLoginSignature({
-        inputs: JSON.parse(encryptedProof),
-        maxEpoch,
-        userSignature: userSig,
-      });
+        const userSig = (await keypair.signTransaction(bytes)).signature;
 
-      const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
-
-      return pool.call(async (client) => {
-        const result = await client.executeTransactionBlock({
-          transactionBlock: bytes,
-          signature: [zkLoginSig, gasSig],
-          options: { showEffects: true },
+        const zkLoginSig = getZkLoginSignature({
+          inputs: JSON.parse(encryptedProof),
+          maxEpoch,
+          userSignature: userSig,
         });
-        return {
-          digest: result.digest,
-          effects: (result.effects || {}) as Record<string, unknown>,
-        };
+
+        const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
+
+        return pool.call(async (client) => {
+          const result = await client.executeTransactionBlock({
+            transactionBlock: bytes,
+            signature: [zkLoginSig, gasSig],
+            options: { showEffects: true },
+          });
+          return {
+            digest: result.digest,
+            effects: (result.effects || {}) as Record<string, unknown>,
+          };
+        });
       });
 }
 

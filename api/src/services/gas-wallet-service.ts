@@ -8,6 +8,12 @@ const logger = pino({ name: 'gas-wallet-service' });
 
 const client = new SuiJsonRpcClient({ url: config.suiRpcUrl, network: 'testnet' });
 
+export interface GasObjectRef {
+  objectId: string;
+  version: string;
+  digest: string;
+}
+
 let primaryKeypair: Ed25519Keypair | null = null;
 let standbyKeypair: Ed25519Keypair | null = null;
 
@@ -51,12 +57,13 @@ export async function checkBalance(): Promise<{ primary: bigint; standby: bigint
   return { primary: BigInt(primary.totalBalance), standby: BigInt(await standbyBalance), status };
 }
 
-export async function selectGasCoin(ownerAddress: string): Promise<string> {
+export async function selectGasCoin(ownerAddress: string): Promise<GasObjectRef> {
   const coins = await client.getCoins({ owner: ownerAddress, coinType: '0x2::sui::SUI' });
   if (!coins.data || coins.data.length === 0) {
-    throw new Error(`No SUI gas coins found for ${ownerAddress}`);
+    throw new Error(`No SUI gas coins found for gas wallet ${ownerAddress}`);
   }
-  return coins.data[0].coinObjectId;
+  const coin = coins.data[0];
+  return { objectId: coin.coinObjectId, version: coin.version, digest: coin.digest };
 }
 
 export async function topUpFromColdReserve(amount: bigint): Promise<string> {
