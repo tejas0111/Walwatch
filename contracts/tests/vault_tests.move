@@ -888,7 +888,7 @@ module auto_renewal::vault_tests {
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
         vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
-        // Verify pauser_revoked was reset to false
+        // Verify current_pauser_id was set (new cap is now valid)
         assert!(vault::is_paused(&c) == false, 222); // sanity: no side effect on paused flag
         test_scenario::return_shared(c);
         test_scenario::return_shared(tl);

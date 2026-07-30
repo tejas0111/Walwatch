@@ -83,9 +83,17 @@ module auto_renewal::vault {
     /// Compute: u64::MAX / (365 × 10000) ≈ 5.05T.
     const MAX_STORAGE_PRICE: u64 = 5_000_000_000_000;
 
+    /// Maximum allowed renew_threshold_epochs.
+    /// Prevents u64 overflow when adding threshold to current_epoch.
+    const MAX_RENEW_THRESHOLD: u64 = 1_000_000;
+
+    /// Maximum allowed renew_by_epochs.
+    /// Prevents setting renew_by_epochs to absurdly high values.
+    const MAX_RENEW_BY: u64 = 10000;
+
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
-    const CONTRACT_VERSION: u64 = 4;
+    const CONTRACT_VERSION: u64 = 5;
 
     // Action type identifiers for AdminTimelock
     const ACTION_NONE: u8 = 0;
@@ -140,7 +148,7 @@ module auto_renewal::vault {
     const EMaxEpochsNotExceeded: u64 = 22;
     /// max_total_epochs exceeds MAX_TOTAL_EPOCHS
     const EMaxEpochsTooHigh: u64 = 23;
-    /// renew_by_epochs must be > 0
+    /// renew_by_epochs must be > 0 or exceeds MAX_RENEW_BY
     const EInvalidRenewByEpochs: u64 = 24;
     /// upgrade package address mismatch
     const EUpgradeCapMismatch: u64 = 25;
@@ -154,6 +162,8 @@ module auto_renewal::vault {
     const EInvalidKeeperFee: u64 = 29;
     /// storage_price_per_epoch exceeds MAX_STORAGE_PRICE
     const EInvalidStoragePrice: u64 = 30;
+    /// renew_threshold_epochs exceeds MAX_RENEW_THRESHOLD
+    const EInvalidRenewThreshold: u64 = 31;
 
 
     // ============================================================================
@@ -202,10 +212,14 @@ module auto_renewal::vault {
         keeper_fee: u64,
         /// Global pause flag — when true, all operations are blocked
         paused: bool,
-        /// Whether a PauserCap has been globally revoked by the admin.
-        /// When true, ALL existing PauserCaps are invalid until a new one
-        /// is issued via the timelock (ACTION_SET_PAUSER).
-        pauser_revoked: bool,
+        /// The ID of the currently valid PauserCap, if any.
+        /// When None, ALL existing PauserCaps are invalid. A new cap
+        /// is issued via the timelock (ACTION_SET_PAUSER) which sets
+        /// this to the new cap's ID. emergency_pause/unpause check
+        /// that the caller's cap ID matches this value, preventing
+        /// old (revoked) caps from working after a new one is issued.
+        /// This replaces the v4 boolean pauser_revoked field.
+        current_pauser_id: Option<ID>,
         /// Estimated WAL cost per epoch of blob storage (in MIST)
         storage_price_per_epoch: u64,
         /// Current contract version — incremented on upgrade via migrate()
@@ -384,7 +398,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
-            pauser_revoked: false,
+            current_pauser_id: option::none(),
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -436,6 +450,9 @@ module auto_renewal::vault {
         if (action == ACTION_SET_STORAGE_PRICE) {
             assert!(value_u64 <= MAX_STORAGE_PRICE, EInvalidStoragePrice);
         };
+        if (action == ACTION_SET_PAUSER) {
+            assert!(value_addr != @0x0, EInvalidAddress);
+        };
 
         let current_epoch = tx_context::epoch(ctx);
         timelock.scheduled_epoch = current_epoch;
@@ -477,9 +494,10 @@ module auto_renewal::vault {
         } else if (action == ACTION_SET_STORAGE_PRICE) {
             config.storage_price_per_epoch = timelock.value_u64;
         } else if (action == ACTION_SET_PAUSER) {
-            // Reset the global revocation flag so the new PauserCap works
-            config.pauser_revoked = false;
             let cap = PauserCap { id: object::new(ctx) };
+            // Set this cap as the currently valid one — old caps are invalidated.
+            // Without this assignment, previously revoked caps would work again.
+            config.current_pauser_id = option::some(object::id(&cap));
             transfer::transfer(cap, timelock.value_addr);
         } else if (action == ACTION_SET_ADMIN_DELAY) {
             timelock.delay_epochs = timelock.value_u64;
@@ -521,47 +539,49 @@ module auto_renewal::vault {
     /// in an emergency, but this also means a compromised operator can
     /// immediately halt the system. The unpause action is likewise instant.
     /// Requires PauserCap (held by the designated operator).
-    /// If the admin has called revoke_pauser(), ALL PauserCaps are invalid
-    /// and this function will abort with EPauserRevoked until a new PauserCap
-    /// is issued via the timelock (ACTION_SET_PAUSER).
+    ///
+    /// If the admin has revoked the PauserCap (via revoke_pauser), ALL
+    /// existing PauserCaps become invalid because current_pauser_id is
+    /// set to None. emergency_pause/unpause check that the caller's cap
+    /// ID matches config.current_pauser_id, so old revoked caps can never
+    /// work again — even if a new PauserCap is later issued (the new cap
+    /// gets a different ID than any old one).
     entry fun emergency_pause(
-        _cap: &PauserCap,
+        cap: &PauserCap,
         config: &mut FeeConfig,
     ) {
-        assert!(!config.pauser_revoked, EPauserRevoked);
+        assert!(config.current_pauser_id.is_some(), EPauserRevoked);
+        assert!(*option::borrow(&config.current_pauser_id) == object::id(cap), EPauserRevoked);
         config.paused = true;
         event::emit(Paused { });
     }
 
     /// Unpause the system — restores all vault operations.
     /// Requires PauserCap (held by the designated operator).
-    /// If the admin has called revoke_pauser(), ALL PauserCaps are invalid.
+    /// If the admin has revoked the PauserCap, ALL PauserCaps are invalid.
     entry fun emergency_unpause(
-        _cap: &PauserCap,
+        cap: &PauserCap,
         config: &mut FeeConfig,
     ) {
-        assert!(!config.pauser_revoked, EPauserRevoked);
+        assert!(config.current_pauser_id.is_some(), EPauserRevoked);
+        assert!(*option::borrow(&config.current_pauser_id) == object::id(cap), EPauserRevoked);
         config.paused = false;
         event::emit(Unpaused { });
     }
 
-    /// Revoke ALL PauserCaps globally — requires AdminCap.
-    /// Sets the pauser_revoked flag in FeeConfig which invalidates ALL
-    /// existing PauserCaps. New PauserCaps can be issued via the timelock
-    /// (ACTION_SET_PAUSER).
+    /// Revoke the currently valid PauserCap — requires AdminCap.
+    /// Sets current_pauser_id to None, invalidating ALL existing PauserCaps.
+    /// New PauserCaps can be issued via the timelock (ACTION_SET_PAUSER),
+    /// which sets current_pauser_id to the new cap's ID, preventing old
+    /// revoked caps from working (unlike the old global boolean approach).
     /// This is NOT timelocked because revoking a compromised operator's
     /// cap must be instantaneous to be effective in an emergency.
-    ///
-    /// NOTE: Unlike the previous implementation that required passing the
-    /// PauserCap object by value (requiring the admin to physically own it),
-    /// this version sets a global flag — the admin doesn't need to collect
-    /// the PauserCap from the operator first.
     entry fun revoke_pauser(
         _admin: &AdminCap,
         config: &mut FeeConfig,
         ctx: &TxContext,
     ) {
-        config.pauser_revoked = true;
+        config.current_pauser_id = option::none();
 
         event::emit(PauserCapRevoked {
             revoked_by: tx_context::sender(ctx),
@@ -600,6 +620,11 @@ module auto_renewal::vault {
         assert!(max_total_epochs <= MAX_TOTAL_EPOCHS, EMaxEpochsTooHigh);
         assert!(withdraw_delay_epochs <= MAX_WITHDRAW_DELAY_EPOCHS, EMaxWithdrawDelayExceeded);
         assert!(beneficiary != @0x0, EInvalidAddress);
+        // HIGH-2: bound renew_by_epochs at creation time (mirrors update_policy check)
+        assert!(renew_by_epochs > 0, EInvalidRenewByEpochs);
+        assert!(renew_by_epochs <= MAX_RENEW_BY, EInvalidRenewByEpochs);
+        // HIGH-2: bound renew_threshold_epochs to prevent u64 overflow in execute_renewal
+        assert!(renew_threshold_epochs <= MAX_RENEW_THRESHOLD, EInvalidRenewThreshold);
         let blob_id = blob.blob_id();
 
         let vault = RenewalVault {
@@ -661,7 +686,11 @@ module auto_renewal::vault {
         assert_not_paused(config);
         assert!(tx_context::sender(ctx) == vault.beneficiary, ENotBeneficiary);
         assert!(new_policy.max_total_epochs <= MAX_TOTAL_EPOCHS, EMaxEpochsTooHigh);
+        // HIGH-2: bound renew_by_epochs at update time
         assert!(new_policy.renew_by_epochs > 0, EInvalidRenewByEpochs);
+        assert!(new_policy.renew_by_epochs <= MAX_RENEW_BY, EInvalidRenewByEpochs);
+        // HIGH-2: bound renew_threshold_epochs to prevent u64 overflow in execute_renewal
+        assert!(new_policy.renew_threshold_epochs <= MAX_RENEW_THRESHOLD, EInvalidRenewThreshold);
         vault.policy = new_policy;
 
         event::emit(PolicyUpdated {
@@ -1138,7 +1167,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
-            pauser_revoked: false,
+            current_pauser_id: option::none(),
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -1162,17 +1191,28 @@ module auto_renewal::vault {
     // Upgrade Migration
     // ============================================================================
 
-    /// Post-upgrade migration hook. Called by Sui framework after a package
-    /// upgrade. Updates FeeConfig.version and runs version-specific migrations.
+    /// Post-upgrade migration hook. Must be called explicitly in a follow-up
+    /// transaction after a package upgrade (Sui does NOT auto-invoke this).
     ///
-    /// This function MUST be called with the existing FeeConfig so it can
-    /// update the version and run any data migrations. If no FeeConfig
-    /// exists at upgrade time (fresh publish), this is a no-op via init().
+    /// Updates FeeConfig.version and runs version-specific migrations.
+    /// Requires UpgradeCap ownership to call (prevents unauthorized version bumps).
     ///
     /// Migration chain (run in order):
-    ///   - v1 → v2: (placeholder for future upgrades)
+    ///   - v2 → v3: creates AdminTimelock shared object (did not exist before v3)
+    ///   - v3 → v4: (no structural migration needed — pauser_revoked field added via upgrade)
+    ///     Sui's forward-compatible field addition means the new bool field defaults to
+    ///     `false` for existing shared objects, which is the correct initial state.
+    ///   - v4 → v5: pauser_revoked bool field replaced by current_pauser_id Option<ID>
+    ///     NOTE: Struct field replacement is NOT supported in Sui upgrades. This migration
+    ///     path is only applicable for FRESH deployments at v5. Upgrading from a v4
+    ///     on-chain deployment requires a two-step process: first deploy a v3→v4 bridge
+    ///     upgrade that adds current_pauser_id while keeping pauser_revoked, then a
+    ///     separate upgrade to remove pauser_revoked (or just keep both fields).
+    ///     For the current v5 fresh deployment, FeeConfig correctly uses only
+    ///     current_pauser_id: Option<ID> without the deprecated bool.
+    #[allow(lint(public_entry))]
     #[ext(migration)]
-    fun migrate(
+    public entry fun migrate(
         upgrade_cap: &UpgradeCap,
         config: &mut FeeConfig,
         _ctx: &mut TxContext,
@@ -1197,10 +1237,16 @@ module auto_renewal::vault {
                 transfer::share_object(timelock);
             };
             if (config.version <= 3) {
-                // v3 → v4: add pauser_revoked field (new field gets Move default)
-                // In Sui, new fields added to shared objects via upgrade default
-                // to the zero value for the type. For bool, the default is false,
-                // which is the correct initial state for pauser_revoked.
+                // v3 → v4: pauser_revoked field auto-added by Sui upgrade (defaults to false)
+                // No structural migration needed — field defaults work for compatibility.
+            };
+            if (config.version <= 4) {
+                // v4 → v5: current_pauser_id is a new field. For fresh deployments it's
+                // initialized correctly in init(). For upgrades, the field defaults to
+                // option::none() via Sui's zero-value initialization for Option<ID>,
+                // which is the correct initial state (no valid PauserCap out of the box).
+                // If upgrading from v4, the old pauser_revoked bool must still exist
+                // in the struct definition — see note at the top of this section.
             };
             config.version = CONTRACT_VERSION;
         };
@@ -1213,7 +1259,7 @@ module auto_renewal::vault {
     /// Estimate the WAL cost of extending a blob by `epochs` epochs.
     ///
     /// Uses the configured `storage_price_per_epoch` from FeeConfig, which
-    /// the admin can adjust via `set_storage_price()`.
+    /// the admin can adjust via set_storage_price.
     ///
     /// NOTE: This is an estimate. The actual Walrus `system::extend_blob`
     /// call determines the real cost at execution time based on storage
