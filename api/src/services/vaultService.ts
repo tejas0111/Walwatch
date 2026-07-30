@@ -10,7 +10,7 @@ import { decrypt } from '../lib/encryption.js';
 import { config } from '../config.js';
 import { selectGasCoin } from './gas-wallet-service.js';
 import { getDb } from '../db/index.js';
-import { users } from '../db/schema.js';
+import { users, subscriptions } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 const logger = pino({ name: 'vault-service' });
@@ -218,8 +218,22 @@ async function recordSpend(orgId: string, amount: number): Promise<void> {
   }
 }
 
-async function getPlanLimits(_orgId: string): Promise<{ maxPerTx: number; maxPerDay: number }> {
-  return { maxPerTx: 1000, maxPerDay: 5000 };
+async function getPlanLimits(orgId: string): Promise<{ maxPerTx: number; maxPerDay: number }> {
+  try {
+    const db = getDb();
+    const [sub] = await db.select({ plan: subscriptions.plan })
+      .from(subscriptions)
+      .where(eq(subscriptions.orgId, orgId))
+      .limit(1);
+    const plan = sub?.plan || 'free';
+    switch (plan) {
+      case 'enterprise': return { maxPerTx: 10000, maxPerDay: 50000 };
+      case 'pro': return { maxPerTx: 1000, maxPerDay: 5000 };
+      default: return { maxPerTx: 100, maxPerDay: 500 };
+    }
+  } catch {
+    return { maxPerTx: 100, maxPerDay: 500 };
+  }
 }
 
 function checkReAuth(sessionAgeMs: number): void {
