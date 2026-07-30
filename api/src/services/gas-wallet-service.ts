@@ -24,6 +24,19 @@ delete process.env.GAS_WALLET_STANDBY_KEY;
 // reside in the hot API process. Use a separate script or hardware wallet
 // to periodically refill the primary gas wallet.
 
+/**
+ * Export gas wallet primary key bytes for use by other services.
+ * The key is already loaded from process.env at module init and scrubbed.
+ * This avoids the double-delete issue where vaultService.ts also tried
+ * to read and delete the env var.
+ */
+export function getGasWalletPrimaryKeyBytes(): Uint8Array {
+  if (!GAS_WALLET_PRIMARY_KEY) {
+    throw new Error('GAS_WALLET_PRIMARY_KEY not set — gas wallet unavailable');
+  }
+  return Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
+}
+
 function ensurePrimary(): Ed25519Keypair {
   if (!primaryKeypair) {
     if (!GAS_WALLET_PRIMARY_KEY) {

@@ -73,7 +73,7 @@ module auto_renewal::vault {
 
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
-    const CONTRACT_VERSION: u64 = 3;
+    const CONTRACT_VERSION: u64 = 4;
 
     // Action type identifiers for AdminTimelock
     const ACTION_NONE: u8 = 0;
@@ -142,6 +142,9 @@ module auto_renewal::vault {
     const EAdminDelayTooLow: u64 = 26;
     /// withdraw_delay_epochs exceeds MAX_WITHDRAW_DELAY
     const EMaxWithdrawDelayExceeded: u64 = 27;
+    /// PauserCap has been revoked by admin — emergency operations blocked
+    const EPauserRevoked: u64 = 28;
+
 
     // ============================================================================
     // Structs
@@ -189,6 +192,10 @@ module auto_renewal::vault {
         keeper_fee: u64,
         /// Global pause flag — when true, all operations are blocked
         paused: bool,
+        /// Whether a PauserCap has been globally revoked by the admin.
+        /// When true, ALL existing PauserCaps are invalid until a new one
+        /// is issued via the timelock (ACTION_SET_PAUSER).
+        pauser_revoked: bool,
         /// Estimated WAL cost per epoch of blob storage (in MIST)
         storage_price_per_epoch: u64,
         /// Current contract version — incremented on upgrade via migrate()
@@ -369,6 +376,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
+            pauser_revoked: false,
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -455,6 +463,8 @@ module auto_renewal::vault {
         } else if (action == ACTION_SET_STORAGE_PRICE) {
             config.storage_price_per_epoch = timelock.value_u64;
         } else if (action == ACTION_SET_PAUSER) {
+            // Reset the global revocation flag so the new PauserCap works
+            config.pauser_revoked = false;
             let cap = PauserCap { id: object::new(ctx) };
             transfer::transfer(cap, timelock.value_addr);
         } else if (action == ACTION_SET_ADMIN_DELAY) {
@@ -497,42 +507,50 @@ module auto_renewal::vault {
     /// in an emergency, but this also means a compromised operator can
     /// immediately halt the system. The unpause action is likewise instant.
     /// Requires PauserCap (held by the designated operator).
-    /// To revoke a PauserCap, use revoke_pauser() (requires AdminCap).
+    /// If the admin has called revoke_pauser(), ALL PauserCaps are invalid
+    /// and this function will abort with EPauserRevoked until a new PauserCap
+    /// is issued via the timelock (ACTION_SET_PAUSER).
     entry fun emergency_pause(
         _cap: &PauserCap,
         config: &mut FeeConfig,
     ) {
+        assert!(!config.pauser_revoked, EPauserRevoked);
         config.paused = true;
         event::emit(Paused { });
     }
 
     /// Unpause the system — restores all vault operations.
     /// Requires PauserCap (held by the designated operator).
-    /// To revoke a PauserCap, use revoke_pauser() (requires AdminCap).
+    /// If the admin has called revoke_pauser(), ALL PauserCaps are invalid.
     entry fun emergency_unpause(
         _cap: &PauserCap,
         config: &mut FeeConfig,
     ) {
+        assert!(!config.pauser_revoked, EPauserRevoked);
         config.paused = false;
         event::emit(Unpaused { });
     }
 
-    /// Revoke a PauserCap — requires AdminCap.
-    /// Destroys the PauserCap, preventing further pause/unpause until a
-    /// new one is issued via the timelock (ACTION_SET_PAUSER).
+    /// Revoke ALL PauserCaps globally — requires AdminCap.
+    /// Sets the pauser_revoked flag in FeeConfig which invalidates ALL
+    /// existing PauserCaps. New PauserCaps can be issued via the timelock
+    /// (ACTION_SET_PAUSER).
     /// This is NOT timelocked because revoking a compromised operator's
     /// cap must be instantaneous to be effective in an emergency.
+    ///
+    /// NOTE: Unlike the previous implementation that required passing the
+    /// PauserCap object by value (requiring the admin to physically own it),
+    /// this version sets a global flag — the admin doesn't need to collect
+    /// the PauserCap from the operator first.
     entry fun revoke_pauser(
         _admin: &AdminCap,
-        cap: PauserCap,
+        config: &mut FeeConfig,
         ctx: &TxContext,
     ) {
-        let operator = tx_context::sender(ctx);
-        let PauserCap { id } = cap;
-        id.delete();
+        config.pauser_revoked = true;
 
         event::emit(PauserCapRevoked {
-            revoked_by: operator,
+            revoked_by: tx_context::sender(ctx),
         });
     }
 
@@ -1093,6 +1111,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
+            pauser_revoked: false,
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -1149,6 +1168,12 @@ module auto_renewal::vault {
                     value_addr: @0x0,
                 };
                 transfer::share_object(timelock);
+            };
+            if (config.version <= 3) {
+                // v3 → v4: add pauser_revoked field (new field gets Move default)
+                // In Sui, new fields added to shared objects via upgrade default
+                // to the zero value for the type. For bool, the default is false,
+                // which is the correct initial state for pauser_revoked.
             };
             config.version = CONTRACT_VERSION;
         };

@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
-import Redis from 'ioredis';
 import { OAuth2Client } from 'google-auth-library';
 import { Ed25519Keypair, Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519';
 import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
@@ -16,6 +15,7 @@ import { eq, and } from 'drizzle-orm';
 import { AppError } from '../lib/errors.js';
 import { rateLimit } from '../middleware/rate-limit.js';
 import { computeSalt, deriveZkLoginAddress, getIssuer, generateEphemeralKeypair, generateJwtRandomness, generateZkProof, getEphemeralPublicKey, computeNonce, generateNonceRandomness } from '../services/zklogin-service.js';
+import { getRedisClient } from '../lib/redis-client.js';
 import { encrypt } from '../lib/encryption.js';
 import { config } from '../config.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -119,7 +119,7 @@ router.post('/zklogin/prepare',
 
       const nonce = computeNonce(publicKey, maxEpoch, jwtRandomness);
 
-      const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+      const redis = await getRedisClient();
       await redis.hmset(`zklogin:session:${nonce}`, {
         ephemeralPublicKey: clientEphemeralPublicKeyHex,
         jwtRandomness,
@@ -127,7 +127,6 @@ router.post('/zklogin/prepare',
         iat: Date.now().toString(),
       });
       await redis.expire(`zklogin:session:${nonce}`, 300);
-      await redis.quit();
 
       return c.json({
         nonce,
@@ -170,7 +169,7 @@ router.post('/google',
           return c.json({ error: { message: 'ephemeralPublicKey required with nonce', code: 'MISSING_EPHEMERAL_KEY' } }, 400);
         }
 
-        const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+        const redis = await getRedisClient();
         const session = await redis.hgetall(`zklogin:session:${clientNonce}`);
 
         if (!session || !session.ephemeralPublicKey || !session.jwtRandomness || !session.maxEpoch) {
@@ -195,7 +194,6 @@ router.post('/google',
         }
 
         await redis.del(`zklogin:session:${clientNonce}`);
-        await redis.quit();
 
         nonceFlowData = { ephemeralPublicKey: storedPublicKeyBytes, jwtRandomness: session.jwtRandomness, maxEpoch: parseInt(session.maxEpoch) };
       }

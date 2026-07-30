@@ -70,4 +70,13 @@ export const config = {
    * Set to empty string (default) to omit kid from header.
    */
   jwtKeyId: process.env.JWT_KEY_ID || '',
+
+  /**
+   * Gas budget for create_vault transactions in MIST.
+   */
+  gasBudgetCreateVault: parseInt(process.env.GAS_BUDGET_CREATE_VAULT || '10000000', 10),
+  /**
+   * Default gas budget for other vault transactions (deposit, withdraw, etc.) in MIST.
+   */
+  gasBudgetDefault: parseInt(process.env.GAS_BUDGET_DEFAULT || '5000000', 10),
 };

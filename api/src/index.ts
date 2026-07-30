@@ -101,7 +101,8 @@ app.use('*', createMiddleware(async (c, next) => {
 }));
 
 // ── Health check (before auth middleware) ──────────────────────────
-app.get('/health', async (c) => {
+// Rate-limited separately since it sits outside the /api/* middleware scope
+app.get('/health', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (c) => {
   const checks: Record<string, string> = {};
 
   // DB check
