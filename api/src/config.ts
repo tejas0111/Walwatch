@@ -47,4 +47,11 @@ export const config = {
   secretsEncryptionKeyVersion: process.env.SECRETS_ENCRYPTION_KEY_VERSION || '1',
   /** zkLogin prover URL (Mysten hosted or self-hosted) */
   zkProverUrl: process.env.ZK_PROVER_URL || 'https://prover.mystenlabs.com/v1',
+  /**
+   * Separate secret for zkLogin salt derivation.
+   * Must NOT be the same as secretsEncryptionKey.
+   */
+  appSaltSecret: process.env.APP_SALT_SECRET || '',
+  /** Fee config cache TTL in milliseconds (default 5 min). */
+  feeConfigCacheTtlMs: parseInt(process.env.FEE_CONFIG_CACHE_TTL_MS || '300000', 10),
 };
