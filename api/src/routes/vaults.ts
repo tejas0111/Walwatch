@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import pino from 'pino';
 
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireReAuth } from '../middleware/auth.js';
 import { requireOrg } from '../middleware/org-scope.js';
 import { logAudit } from '../middleware/audit.js';
 import { VaultService, SpendCapExceededError } from '../services/vaultService.js';
@@ -165,7 +165,7 @@ router.post('/:vaultId/policy', zValidator('json', updatePolicySchema), async (c
 });
 
 // POST /api/vaults/:vaultId/withdraw — Build unsigned withdraw tx (re-auth gated)
-router.post('/:vaultId/withdraw', zValidator('json', withdrawSchema), async (c) => {
+router.post('/:vaultId/withdraw', requireReAuth, zValidator('json', withdrawSchema), async (c) => {
   try {
     const { vaultId } = c.req.param();
     const body = c.req.valid('json');

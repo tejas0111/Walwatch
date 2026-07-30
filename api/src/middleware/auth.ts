@@ -45,6 +45,14 @@ export async function requireAuth(c: Context<{ Variables: Variables }>, next: Ne
   }
 }
 
+export async function requireReAuth(c: Context, next: Next) {
+  const authTime = c.get('authTime') as number | undefined;
+  if (!authTime || Math.floor(Date.now() / 1000) - authTime > 15 * 60) {
+    return c.json({ error: { message: 'Re-authentication required', code: 'REAUTH_REQUIRED' } }, 401);
+  }
+  await next();
+}
+
 export async function requireAuthOrApiKey(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
   const apiKey = c.req.header('X-API-Key');

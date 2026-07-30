@@ -56,6 +56,17 @@ module auto_renewal::vault {
     /// Default admin timelock delay in Sui epochs (~24h each on mainnet).
     const DEFAULT_ADMIN_DELAY_EPOCHS: u64 = 1;
 
+    /// Maximum allowed total epochs for a vault's renewal policy.
+    /// Prevents keeper griefing via u64 overflow in fee arithmetic.
+    const MAX_TOTAL_EPOCHS: u64 = 10000;
+
+    /// Minimum allowed admin timelock delay in epochs.
+    /// Prevents admin from setting delay=0, which would bypass the timelock.
+    const MIN_ADMIN_DELAY_EPOCHS: u64 = 1;
+
+    /// Maximum epochs to renew in a single call (safety cap on fee arithmetic).
+    const MAX_RENEW_EPOCHS_PER_CALL: u64 = 365;
+
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
     const CONTRACT_VERSION: u64 = 3;
@@ -380,6 +391,9 @@ module auto_renewal::vault {
         if (action == ACTION_SET_PROTOCOL_FEE_BPS) {
             assert!(value_u64 <= MAX_PROTOCOL_FEE_BPS, EInvalidFeeBps);
         };
+        if (action == ACTION_SET_ADMIN_DELAY) {
+            assert!(value_u64 >= MIN_ADMIN_DELAY_EPOCHS, 0);
+        };
 
         let current_epoch = tx_context::epoch(ctx);
         timelock.scheduled_epoch = current_epoch;
@@ -404,7 +418,7 @@ module auto_renewal::vault {
         config: &mut FeeConfig,
         ctx: &mut TxContext,
     ) {
-        assert!(timelock.scheduled_epoch > 0, ENoPendingAction);
+        assert!(timelock.action > ACTION_NONE, ENoPendingAction);
         assert!(
             tx_context::epoch(ctx) >= timelock.scheduled_epoch + timelock.delay_epochs,
             ETimelockNotElapsed,
@@ -443,7 +457,7 @@ module auto_renewal::vault {
         _admin: &AdminCap,
         timelock: &mut AdminTimelock,
     ) {
-        assert!(timelock.scheduled_epoch > 0, ENoPendingAction);
+        assert!(timelock.action > ACTION_NONE, ENoPendingAction);
 
         let action = timelock.action;
         timelock.scheduled_epoch = 0;
@@ -459,6 +473,9 @@ module auto_renewal::vault {
     // ============================================================================
 
     /// Pause the system — blocks all vault operations.
+    /// NOTE: This action is NOT timelocked. The operator can pause instantly
+    /// in an emergency, but this also means a compromised operator can
+    /// immediately halt the system. The unpause action is likewise instant.
     /// Requires PauserCap (held by the designated operator).
     entry fun emergency_pause(
         _cap: &PauserCap,
@@ -507,6 +524,8 @@ module auto_renewal::vault {
         assert_not_paused(config);
         let current_epoch = tx_context::epoch(ctx);
         assert!(max_total_epochs > (blob.end_epoch() as u64), 0); // must extend past current end
+        assert!(max_total_epochs <= MAX_TOTAL_EPOCHS, 0);
+        assert!(beneficiary != @0x0, EInvalidAddress);
         let blob_id = blob.blob_id();
 
         let vault = RenewalVault {
@@ -548,6 +567,7 @@ module auto_renewal::vault {
     ) {
         assert_not_paused(config);
         let amount = coin::value(&coin);
+        assert!(amount > 0, EInvalidAmount);
         balance::join(&mut vault.wal_balance, coin::into_balance(coin));
 
         event::emit(Deposited {
@@ -566,6 +586,8 @@ module auto_renewal::vault {
     ) {
         assert_not_paused(config);
         assert!(tx_context::sender(ctx) == vault.beneficiary, ENotBeneficiary);
+        assert!(new_policy.max_total_epochs <= MAX_TOTAL_EPOCHS, 0);
+        assert!(new_policy.renew_by_epochs > 0, 0);
         vault.policy = new_policy;
 
         event::emit(PolicyUpdated {
@@ -665,11 +687,14 @@ module auto_renewal::vault {
 
     /// Reclaim the Blob object from the vault, cancelling auto-renewal.
     /// Beneficiary only. Transfers the blob back and deactivates the policy.
+    /// Policy deactivation here is intentional — reclaim implies the
+    /// beneficiary no longer wants automated renewals.
     entry fun reclaim_blob(
         vault: &mut RenewalVault,
         ctx: &mut TxContext
     ) {
         assert!(tx_context::sender(ctx) == vault.beneficiary, ENotBeneficiary);
+        assert!(vault.pending_withdraw_amount == 0, EWithdrawAlreadyPending);
 
         // Extract the blob from the Option, aborting if already reclaimed.
         let blob = option::extract(&mut vault.blob);
@@ -797,11 +822,16 @@ module auto_renewal::vault {
                 event::emit(PolicyExhausted {
                     vault_id: object::id(vault),
                     blob_id: vault.blob.borrow().blob_id(),
-                    max_total_epochs,
+                    max_total_epochs: max_epochs,
                 });
                 return
             };
             actual_renew_epochs = max_epochs - (end_epoch as u64);
+        };
+
+        // Safety cap: prevent u64 overflow in fee multiplication
+        if (actual_renew_epochs > MAX_RENEW_EPOCHS_PER_CALL) {
+            actual_renew_epochs = MAX_RENEW_EPOCHS_PER_CALL;
         };
 
         // 4. Compute fees and check balance
@@ -1055,12 +1085,22 @@ module auto_renewal::vault {
         // Verify the UpgradeCap actually belongs to this package.
         // The Sui framework already enforces this, but the explicit
         // check provides defense in depth against misconfigured upgrades.
-        assert!(sui::package::package_id(upgrade_cap) == @auto_renewal, 0);
+        assert!(sui::package::upgrade_package(upgrade_cap).to_address() == @auto_renewal, 0);
 
         // Handle migration from previous versions
         if (config.version < CONTRACT_VERSION) {
-            // v1 → v2: add new fields (handled by struct layout compat)
-            // v2 → v3: AdminTimelock added via init() on upgrade (new shared object)
+            if (config.version <= 2) {
+                // v2 → v3: create AdminTimelock shared object (did not exist before v3)
+                let timelock = AdminTimelock {
+                    id: object::new(_ctx),
+                    delay_epochs: DEFAULT_ADMIN_DELAY_EPOCHS,
+                    scheduled_epoch: 0,
+                    action: ACTION_NONE,
+                    value_u64: 0,
+                    value_addr: @0x0,
+                };
+                transfer::share_object(timelock);
+            };
             config.version = CONTRACT_VERSION;
         };
     }

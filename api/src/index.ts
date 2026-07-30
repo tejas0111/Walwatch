@@ -122,7 +122,6 @@ app.get('/health', async (c) => {
       }, { maxRetries: 2, label: 'health-sui-rpc', baseDelay: 500 });
     });
     checks.suiRpc = 'connected';
-    checks.suiEndpoints = pool.urls.join(', ');
   } catch {
     checks.suiRpc = 'error';
   }
@@ -144,13 +143,7 @@ app.get('/health', async (c) => {
 
   const allOk = Object.values(checks).every((s) => s === 'connected' || s === 'not_configured');
   const statusCode = allOk ? 200 : 503;
-  return c.json({
-    status: allOk ? 'ok' : 'degraded',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    version: process.env.npm_package_version || '0.1.0',
-    ...checks,
-  }, statusCode);
+  return c.json({ status: allOk ? 'ok' : 'degraded' }, statusCode);
 });
 
 // ── Metrics (restrict to localhost in production) ──────────────────
@@ -167,10 +160,15 @@ app.get('/metrics', (c, next) => {
   const socketAddr = env.incoming?.socket?.remoteAddress || '';
   const isSocketLocal = socketAddr === '127.0.0.1' || socketAddr === '::1' || socketAddr === '::ffff:127.0.0.1';
 
-  // Fallback: check proxy headers for deployments behind a trusted reverse proxy
-  const forwarded = c.req.header('x-forwarded-for');
-  const proxyIp = forwarded ? forwarded.split(',')[0].trim() : c.req.header('x-real-ip') || '';
-  const isProxyLocal = proxyIp === '127.0.0.1' || proxyIp === '::1' || proxyIp === '::ffff:127.0.0.1';
+  // Fallback: only trust proxy headers if X-Forwarded-By confirms the proxy identity
+  const forwardedBy = c.req.header('x-forwarded-by');
+  const isProxyLocal = forwardedBy
+    ? (() => {
+        const forwarded = c.req.header('x-forwarded-for');
+        const ip = forwarded ? forwarded.split(',')[0].trim() : c.req.header('x-real-ip') || '';
+        return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      })()
+    : false;
 
   if (!isSocketLocal && !isProxyLocal) {
     const reqId = c.get('requestId') as string | undefined;

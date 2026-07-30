@@ -37,6 +37,20 @@ const WAL_COIN_TYPE = config.walCoinType;
 const FEE_CONFIG_OBJECT_ID = process.env.FEE_CONFIG_OBJECT_ID || '';
 
 const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY || '';
+delete process.env.GAS_WALLET_PRIMARY_KEY;
+
+// Shared Redis client singleton — prevents connection leaks from per-call clients.
+let redisClient: ReturnType<typeof import('redis').createClient> | null = null;
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+
+async function getRedis(): Promise<ReturnType<typeof import('redis').createClient>> {
+  if (redisClient?.isOpen) return redisClient;
+  const { default: redis } = await import('redis');
+  redisClient = redis.createClient({ url: REDIS_URL });
+  redisClient.on('error', (err: Error) => logger.error({ err }, 'Redis client error'));
+  await redisClient.connect();
+  return redisClient;
+}
 
 interface CreateVaultRequest {
   wallet_address: string;
@@ -115,16 +129,12 @@ const COMPARE_AND_DELETE_SCRIPT = `
 async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
   try {
     const token = crypto.randomUUID();
-    const { default: redis } = await import('redis');
-    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-    await r.connect();
+    const r = await getRedis();
     const acquired = await r.setNX(key, token);
     if (acquired === 1) {
       await r.pExpire(key, ttlMs);
-      await r.quit();
       return token;
     }
-    await r.quit();
     return null;
   } catch {
     return null;
@@ -133,11 +143,8 @@ async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
 
 async function releaseLock(key: string, token: string): Promise<void> {
   try {
-    const { default: redis } = await import('redis');
-    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-    await r.connect();
+    const r = await getRedis();
     await r.eval(COMPARE_AND_DELETE_SCRIPT, { keys: [key], arguments: [token] });
-    await r.quit();
   } catch {
   }
 }
@@ -239,30 +246,21 @@ async function submitUserSignedTx(
 }
 
 async function getSpendTotal(orgId: string, windowMs: number): Promise<number> {
-  try {
-    const { default: redis } = await import('redis');
-    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-    await r.connect();
-    const key = `spend:${orgId}:total:${windowMs}`;
-    const val = await r.get(key);
-    await r.quit();
-    return val ? Number(val) : 0;
-  } catch {
-    return 0;
-  }
+  const r = await getRedis().catch(() => {
+    throw new Error('Spend cap check failed — Redis unavailable');
+  });
+  const key = `spend:${orgId}:total:${windowMs}`;
+  const val = await r.get(key);
+  return val ? Number(val) : 0;
 }
 
 async function recordSpend(orgId: string, amount: number): Promise<void> {
-  try {
-    const { default: redis } = await import('redis');
-    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-    await r.connect();
-    const dayKey = `spend:${orgId}:total:${86400000}`;
-    await r.incrBy(dayKey, amount);
-    await r.expire(dayKey, 86401);
-    await r.quit();
-  } catch {
-  }
+  const r = await getRedis().catch(() => {
+    throw new Error('Spend recording failed — Redis unavailable');
+  });
+  const dayKey = `spend:${orgId}:total:${86400000}`;
+  await r.incrBy(dayKey, amount);
+  await r.expire(dayKey, 86401);
 }
 
 async function getPlanLimits(orgId: string): Promise<{ maxPerTx: number; maxPerDay: number }> {
@@ -705,10 +703,8 @@ export class VaultService {
 
       return result;
     } catch (error) {
-      logger.error({ error }, 'Failed to fetch FeeConfig — using stale cache if available');
-      if (this.cachedFeeConfig) {
-        return this.cachedFeeConfig;
-      }
+      logger.error({ error }, 'Failed to fetch FeeConfig — invalidating cache');
+      this.cachedFeeConfig = null;
       return null;
     }
   }

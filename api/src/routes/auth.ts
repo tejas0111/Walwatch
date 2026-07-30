@@ -297,16 +297,31 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || 'http://localhost:3000/login';
 
+// In-memory OAuth state store (short-lived, TTL 5 min).
+const oauthStateStore = new Map<string, number>();
+const OAUTH_STATE_TTL = 5 * 60 * 1000;
+
+// Periodically purge expired states.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, expiresAt] of oauthStateStore) {
+    if (now > expiresAt) oauthStateStore.delete(key);
+  }
+}, 60_000).unref();
+
 const githubAuthSchema = z.object({
   code: z.string().min(1),
+  state: z.string().min(1),
 });
 
 router.get('/github/url', (c) => {
   if (!GITHUB_CLIENT_ID) {
     return c.json({ error: { message: 'GitHub OAuth not configured', code: 'OAUTH_NOT_CONFIGURED' } }, 500);
   }
-  const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(GITHUB_REDIRECT_URI)}&scope=read:user+user:email`;
-  return c.json({ url });
+  const state = crypto.randomUUID();
+  oauthStateStore.set(state, Date.now() + OAUTH_STATE_TTL);
+  const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(GITHUB_REDIRECT_URI)}&state=${state}&scope=read:user+user:email`;
+  return c.json({ url, state });
 });
 
 router.post('/github',
@@ -314,10 +329,17 @@ router.post('/github',
   zValidator('json', githubAuthSchema),
   async (c) => {
     try {
-      const { code } = c.req.valid('json');
+      const { code, state } = c.req.valid('json');
 
       if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
         return c.json({ error: { message: 'GitHub OAuth not configured', code: 'OAUTH_NOT_CONFIGURED' } }, 500);
+      }
+
+      // Validate OAuth state to prevent CSRF (RFC 6749 §10.12)
+      const storedExpiry = oauthStateStore.get(state);
+      oauthStateStore.delete(state); // single-use
+      if (!storedExpiry || Date.now() > storedExpiry) {
+        return c.json({ error: { message: 'Invalid or expired OAuth state', code: 'OAUTH_STATE_ERROR' } }, 401);
       }
 
       const tokenRes = await fetch('https://github.com/login/oauth/access_token', {

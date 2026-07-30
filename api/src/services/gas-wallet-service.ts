@@ -18,6 +18,8 @@ let standbyKeypair: Ed25519Keypair | null = null;
 
 const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY;
 const GAS_WALLET_STANDBY_KEY = process.env.GAS_WALLET_STANDBY_KEY;
+delete process.env.GAS_WALLET_PRIMARY_KEY;
+delete process.env.GAS_WALLET_STANDBY_KEY;
 // Cold reserve top-up is a manual/offline step — the cold key MUST NOT
 // reside in the hot API process. Use a separate script or hardware wallet
 // to periodically refill the primary gas wallet.
