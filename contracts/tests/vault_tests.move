@@ -11,7 +11,7 @@ module auto_renewal::vault_tests {
     use wal::wal::WAL;
     use walrus::system::{Self, System};
     use walrus::blob::Blob;
-    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminTimelock, AdminCap, PauserCap};
+    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminTimelock, AdminCap, PauserCap, PauserRegistry};
 
     const U: address = @0xA;
     const K: address = @0xB;
@@ -25,16 +25,18 @@ module auto_renewal::vault_tests {
     /// Init env: call init_for_testing in tx 0, then set treasury in tx 1.
     fun init_env(): test_scenario::Scenario {
         let mut s = test_scenario::begin(ADMIN);
-        // Tx 0: manually init FeeConfig + AdminCap + AdminTimelock
+        // Tx 0: manually init FeeConfig + AdminCap + AdminTimelock + PauserRegistry
         vault::init_for_testing(ctx(&mut s));
-        // Advance to tx 1: now take AdminCap + FeeConfig + Timelock to set treasury
+        // Advance to tx 1: now take AdminCap + FeeConfig + Timelock + Registry to set treasury
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 1, 0, TREASURY, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Still in tx 1 — caller advances
@@ -73,6 +75,16 @@ module auto_renewal::vault_tests {
     /// Return the shared AdminTimelock.
     fun put_timelock(_s: &mut test_scenario::Scenario, tl: AdminTimelock) {
         test_scenario::return_shared(tl);
+    }
+
+    /// Take the shared PauserRegistry (must be returned with put_registry).
+    fun get_registry(s: &mut test_scenario::Scenario): PauserRegistry {
+        test_scenario::take_shared<PauserRegistry>(s)
+    }
+
+    /// Return the shared PauserRegistry.
+    fun put_registry(_s: &mut test_scenario::Scenario, registry: PauserRegistry) {
+        test_scenario::return_shared(registry);
     }
 
     /// Create a vault in the CURRENT tx. Caller must be in right sender tx.
@@ -567,9 +579,11 @@ module auto_renewal::vault_tests {
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut tl = get_timelock(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 2, 200, @0x0, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = get_registry(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         vault::schedule_admin_action(&cap, &mut tl, 3, 2_000_000, @0x0, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
+        put_registry(&mut s, r);
         assert!(vault::protocol_fee_bps(&c) == 200, 70);
         assert!(vault::keeper_fee(&c) == 2_000_000, 71);
         assert!(vault::treasury_address(&c) == TREASURY, 72);
@@ -658,21 +672,24 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = get_timelock(&mut s);
-        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        let mut r = get_registry(&mut s);
         let mut c = get_config(&mut s);
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         put_config(&mut s, c);
+        put_registry(&mut s, r);
         put_timelock(&mut s, tl);
         test_scenario::return_to_sender(&mut s, cap);
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         assert!(vault::is_paused(&c) == false, 100);
-        vault::emergency_pause(&pcap, &mut c);
+        vault::emergency_pause(&pcap, &r, &mut c);
         assert!(vault::is_paused(&c) == true, 101);
-        vault::emergency_unpause(&pcap, &mut c);
+        vault::emergency_unpause(&pcap, &r, &mut c);
         assert!(vault::is_paused(&c) == false, 102);
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, pcap);
         end(s);
     }
@@ -691,15 +708,18 @@ module auto_renewal::vault_tests {
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 2: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::emergency_pause(&pcap, &mut c);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::emergency_pause(&pcap, &r, &mut c);
         test_scenario::return_shared(c);
         test_scenario::return_to_sender(&mut s, pcap);
         // Tx 3: U tries to create vault — should fail with EPaused (code 10)
@@ -732,17 +752,20 @@ module auto_renewal::vault_tests {
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 3: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::emergency_pause(&pcap, &mut c);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::emergency_pause(&pcap, &r, &mut c);
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, pcap);
         // Tx 4: K tries execute_renewal — should fail with EPaused (code 10)
         next_tx(&mut s, K);
@@ -777,8 +800,10 @@ module auto_renewal::vault_tests {
         // Verify we can schedule a new action immediately after cancel
         let mut c = get_config(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 2, 600, @0x0, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = get_registry(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         put_config(&mut s, c);
+        put_registry(&mut s, r);
         put_timelock(&mut s, tl);
         test_scenario::return_to_sender(&mut s, cap);
         let effects = end(s);
@@ -807,7 +832,9 @@ module auto_renewal::vault_tests {
         assert!(vault::keeper_fee(&c) == 1_000_000, 213);
         // Now schedule and execute to verify normal flow still works
         vault::schedule_admin_action(&cap, &mut tl, 3, 5_000_000, @0x0, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = get_registry(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
+        put_registry(&mut s, r);
         assert!(vault::keeper_fee(&c) == 5_000_000, 214);
         put_config(&mut s, c);
         put_timelock(&mut s, tl);
@@ -828,23 +855,29 @@ module auto_renewal::vault_tests {
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 2: Operator receives PauserCap
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        // Tx 3: Admin revokes ALL pauser caps
+        // Tx 3: Admin revokes ALL pauser caps (revoke_pauser takes registry, not FeeConfig)
         test_scenario::next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        vault::revoke_pauser(&cap, &mut c, ctx(&mut s));
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::revoke_pauser(&cap, &mut r, ctx(&mut s));
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 4: Operator tries to pause — should fail with EPauserRevoked (28)
         test_scenario::next_tx(&mut s, OPERATOR);
-        vault::emergency_pause(&pcap, &mut c);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::emergency_pause(&pcap, &r, &mut c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(c);
         test_scenario::return_to_sender(&mut s, pcap);
         end(s);
@@ -862,44 +895,52 @@ module auto_renewal::vault_tests {
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 2: Operator receives PauserCap
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         // Return objects before ending tx 2
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, pcap);
-        // Tx 3: Admin revokes ALL pauser caps
+        // Tx 3: Admin revokes ALL pauser caps (revoke_pauser takes registry, not FeeConfig)
         test_scenario::next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::revoke_pauser(&cap, &mut c, ctx(&mut s));
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::revoke_pauser(&cap, &mut r, ctx(&mut s));
         test_scenario::return_to_sender(&mut s, cap);
-        test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         // Tx 4: ADMIN creates NEW PauserCap for OPERATOR via timelock
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
         vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         // Verify current_pauser_id was set (new cap is now valid)
         assert!(vault::is_paused(&c) == false, 222); // sanity: no side effect on paused flag
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 5: Operator receives NEW PauserCap — should be able to pause now
         next_tx(&mut s, OPERATOR);
         let pcap2 = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::emergency_pause(&pcap2, &mut c);
+        let r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::emergency_pause(&pcap2, &r, &mut c);
         assert!(vault::is_paused(&c) == true, 223);
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, pcap2);
         end(s);
     }
@@ -1046,17 +1087,20 @@ module auto_renewal::vault_tests {
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
-        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, &mut r, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 3: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::emergency_pause(&pcap, &mut c);
+        let mut r = test_scenario::take_shared<PauserRegistry>(&mut s);
+        vault::emergency_pause(&pcap, &r, &mut c);
         test_scenario::return_shared(c);
+        test_scenario::return_shared(r);
         test_scenario::return_to_sender(&mut s, pcap);
         // Tx 4: U withdraws (should succeed while paused)
         next_tx(&mut s, U);

@@ -156,7 +156,7 @@ module auto_renewal::vault {
     const EAdminDelayTooLow: u64 = 26;
     /// withdraw_delay_epochs exceeds MAX_WITHDRAW_DELAY
     const EMaxWithdrawDelayExceeded: u64 = 27;
-    /// PauserCap has been revoked by admin — emergency operations blocked
+    /// PauserCap has been revoked by admin, or registry not initialized
     const EPauserRevoked: u64 = 28;
     /// keeper_fee exceeds MAX_KEEPER_FEE
     const EInvalidKeeperFee: u64 = 29;
@@ -202,6 +202,11 @@ module auto_renewal::vault {
     }
 
     /// Global fee configuration, created in init() and shared.
+    /// v5+ NOTE: FeeConfig's struct layout is IDENTICAL to the v4 layout.
+    /// No fields have been added or removed. The pauser-revocation state
+    /// has been moved to a separate PauserRegistry shared object (created
+    /// alongside v5) to satisfy Sui's Compatible upgrade policy —
+    /// existing struct layouts must remain identical across upgrades.
     public struct FeeConfig has key {
         id: UID,
         /// Address that receives protocol fees
@@ -212,22 +217,32 @@ module auto_renewal::vault {
         keeper_fee: u64,
         /// Global pause flag — when true, all operations are blocked
         paused: bool,
-        /// DEPRECATED v4 field. Kept for upgrade compatibility (Sui does not
-        /// allow removing or replacing struct fields). All pause logic now
-        /// uses current_pauser_id below. This field is never read in v5+.
+        /// DEPRECATED v4 field. Kept for struct-layout compatibility on
+        /// upgrades (Sui does not allow removing, renaming, or changing
+        /// the type of any existing struct field). This field is NEVER
+        /// read in v5+ — all pause logic uses the PauserRegistry instead.
         pauser_revoked: bool,
-        /// The ID of the currently valid PauserCap, if any.
-        /// When None, ALL existing PauserCaps are invalid. A new cap
-        /// is issued via the timelock (ACTION_SET_PAUSER) which sets
-        /// this to the new cap's ID. emergency_pause/unpause check
-        /// that the caller's cap ID matches this value, preventing
-        /// old (revoked) caps from working after a new one is issued.
-        /// This replaces the v4 boolean pauser_revoked approach.
-        current_pauser_id: Option<ID>,
         /// Estimated WAL cost per epoch of blob storage (in MIST)
         storage_price_per_epoch: u64,
         /// Current contract version — incremented on upgrade via migrate()
         version: u64,
+    }
+
+    /// Pauser registry — separate shared object created in v5 to track
+    /// the currently valid PauserCap. Lives OUTSIDE FeeConfig because
+    /// Sui's Compatible upgrade policy does not allow adding fields to
+    /// existing structs. This object is created fresh in init() (for new
+    /// deployments) or in migrate() (for v4→v5 upgrades).
+    public struct PauserRegistry has key {
+        id: UID,
+        /// The ID of the currently valid PauserCap, if any.
+        /// When None, ALL existing PauserCaps are invalid. Issuing a new
+        /// PauserCap via the timelock (ACTION_SET_PAUSER) sets this to
+        /// the new cap's object ID. emergency_pause/unpause check that
+        /// the caller's cap ID matches this value, preventing old revoked
+        /// caps from ever working again (even after a new cap is issued —
+        /// the new cap gets a different ID via object::new(ctx)).
+        current_pauser_id: Option<ID>,
     }
 
     /// Core vault object — holds the blob and WAL balance for auto-renewal.
@@ -395,6 +410,11 @@ module auto_renewal::vault {
     /// Initialize the FeeConfig with default values and create AdminCap.
     /// The deployer receives the AdminCap and MUST configure the treasury
     /// address before any renewal can execute.
+    ///
+    /// Creates and shares PauserRegistry alongside FeeConfig. For fresh
+    /// deployments, the PauserRegistry starts with current_pauser_id = none
+    /// (no operator can pause until the admin issues a PauserCap via the
+    /// timelock). For upgrades from v4, migrate() creates the PauserRegistry.
     fun init(ctx: &mut TxContext) {
         let fee_config = FeeConfig {
             id: object::new(ctx),
@@ -402,8 +422,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
-            pauser_revoked: false,  // DEPRECATED v4 field — kept for upgrade compat
-            current_pauser_id: option::none(),
+            pauser_revoked: false,  // DEPRECATED v4 field — kept for struct-layout compat
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -421,6 +440,15 @@ module auto_renewal::vault {
 
         let admin_cap = AdminCap { id: object::new(ctx) };
         transfer::transfer(admin_cap, tx_context::sender(ctx));
+
+        // Create PauserRegistry as a separate shared object (not embedded in
+        // FeeConfig) so that upgrades can add/modify pauser tracking without
+        // violating Sui's struct-layout compatibility rules for existing objects.
+        let registry = PauserRegistry {
+            id: object::new(ctx),
+            current_pauser_id: option::none(),
+        };
+        transfer::share_object(registry);
     }
 
     // ============================================================================
@@ -477,9 +505,11 @@ module auto_renewal::vault {
 
     /// Execute a previously scheduled admin action after the timelock delay
     /// has elapsed. Permissionless — anyone can call this.
+    /// Requires PauserRegistry for ACTION_SET_PAUSER to register the new cap.
     entry fun execute_admin_action(
         timelock: &mut AdminTimelock,
         config: &mut FeeConfig,
+        registry: &mut PauserRegistry,
         ctx: &mut TxContext,
     ) {
         assert!(timelock.action > ACTION_NONE, ENoPendingAction);
@@ -500,9 +530,9 @@ module auto_renewal::vault {
             config.storage_price_per_epoch = timelock.value_u64;
         } else if (action == ACTION_SET_PAUSER) {
             let cap = PauserCap { id: object::new(ctx) };
-            // Set this cap as the currently valid one — old caps are invalidated.
-            // Without this assignment, previously revoked caps would work again.
-            config.current_pauser_id = option::some(object::id(&cap));
+            // Register this cap as the currently valid one in the PauserRegistry.
+            // Old revoked caps are invalidated because their IDs won't match.
+            registry.current_pauser_id = option::some(object::id(&cap));
             transfer::transfer(cap, timelock.value_addr);
         } else if (action == ACTION_SET_ADMIN_DELAY) {
             timelock.delay_epochs = timelock.value_u64;
@@ -543,50 +573,49 @@ module auto_renewal::vault {
     /// NOTE: This action is NOT timelocked. The operator can pause instantly
     /// in an emergency, but this also means a compromised operator can
     /// immediately halt the system. The unpause action is likewise instant.
-    /// Requires PauserCap (held by the designated operator).
-    ///
-    /// If the admin has revoked the PauserCap (via revoke_pauser), ALL
-    /// existing PauserCaps become invalid because current_pauser_id is
-    /// set to None. emergency_pause/unpause check that the caller's cap
-    /// ID matches config.current_pauser_id, so old revoked caps can never
-    /// work again — even if a new PauserCap is later issued (the new cap
-    /// gets a different ID than any old one).
+    /// Requires:
+    ///   - PauserCap (held by the designated operator)
+    ///   - PauserRegistry (must have current_pauser_id set to the cap's ID)
+    ///     If the admin has revoked the PauserCap, current_pauser_id is None
+    ///     and ALL PauserCaps become invalid until a new one is issued.
     entry fun emergency_pause(
         cap: &PauserCap,
+        registry: &PauserRegistry,
         config: &mut FeeConfig,
     ) {
-        assert!(config.current_pauser_id.is_some(), EPauserRevoked);
-        assert!(*option::borrow(&config.current_pauser_id) == object::id(cap), EPauserRevoked);
+        assert!(registry.current_pauser_id.is_some(), EPauserRevoked);
+        assert!(*option::borrow(&registry.current_pauser_id) == object::id(cap), EPauserRevoked);
         config.paused = true;
         event::emit(Paused { });
     }
 
     /// Unpause the system — restores all vault operations.
     /// Requires PauserCap (held by the designated operator).
-    /// If the admin has revoked the PauserCap, ALL PauserCaps are invalid.
+    /// Requires PauserRegistry with matching current_pauser_id.
     entry fun emergency_unpause(
         cap: &PauserCap,
+        registry: &PauserRegistry,
         config: &mut FeeConfig,
     ) {
-        assert!(config.current_pauser_id.is_some(), EPauserRevoked);
-        assert!(*option::borrow(&config.current_pauser_id) == object::id(cap), EPauserRevoked);
+        assert!(registry.current_pauser_id.is_some(), EPauserRevoked);
+        assert!(*option::borrow(&registry.current_pauser_id) == object::id(cap), EPauserRevoked);
         config.paused = false;
         event::emit(Unpaused { });
     }
 
     /// Revoke the currently valid PauserCap — requires AdminCap.
-    /// Sets current_pauser_id to None, invalidating ALL existing PauserCaps.
-    /// New PauserCaps can be issued via the timelock (ACTION_SET_PAUSER),
-    /// which sets current_pauser_id to the new cap's ID, preventing old
-    /// revoked caps from working (unlike the old global boolean approach).
+    /// Sets the registry's current_pauser_id to None, invalidating ALL
+    /// existing PauserCaps. New PauserCaps can be issued via the timelock
+    /// (ACTION_SET_PAUSER), which sets current_pauser_id to the new cap's
+    /// ID, preventing old revoked caps from working.
     /// This is NOT timelocked because revoking a compromised operator's
     /// cap must be instantaneous to be effective in an emergency.
     entry fun revoke_pauser(
         _admin: &AdminCap,
-        config: &mut FeeConfig,
+        registry: &mut PauserRegistry,
         ctx: &TxContext,
     ) {
-        config.current_pauser_id = option::none();
+        registry.current_pauser_id = option::none();
 
         event::emit(PauserCapRevoked {
             revoked_by: tx_context::sender(ctx),
@@ -1148,6 +1177,15 @@ module auto_renewal::vault {
     }
 
     // ============================================================================
+    // PauserRegistry View Functions
+    // ============================================================================
+
+    /// Get the currently valid PauserCap ID from the registry, if any.
+    public fun current_pauser_id(registry: &PauserRegistry): Option<ID> {
+        registry.current_pauser_id
+    }
+
+    // ============================================================================
     // Policy Field Getters (needed by test modules in separate module)
     // ============================================================================
 
@@ -1175,7 +1213,8 @@ module auto_renewal::vault {
     // Test-Only Initialization
     // ============================================================================
 
-    /// Test-only init: creates and shares FeeConfig, transfers AdminCap to caller.
+    /// Test-only init: creates and shares FeeConfig, AdminTimelock,
+    /// PauserRegistry, and transfers AdminCap to caller.
     /// Must be called in the first next_tx of each test.
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
@@ -1185,8 +1224,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
-            pauser_revoked: false,  // DEPRECATED v4 field — kept for upgrade compat
-            current_pauser_id: option::none(),
+            pauser_revoked: false,  // DEPRECATED v4 field — kept for struct-layout compat
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
         };
@@ -1202,6 +1240,12 @@ module auto_renewal::vault {
         };
         transfer::share_object(timelock);
 
+        let registry = PauserRegistry {
+            id: object::new(ctx),
+            current_pauser_id: option::none(),
+        };
+        transfer::share_object(registry);
+
         let admin_cap = AdminCap { id: object::new(ctx) };
         transfer::transfer(admin_cap, tx_context::sender(ctx));
     }
@@ -1216,16 +1260,21 @@ module auto_renewal::vault {
     /// Updates FeeConfig.version and runs version-specific migrations.
     /// Requires UpgradeCap ownership to call (prevents unauthorized version bumps).
     ///
+    /// CRITICAL: FeeConfig's struct layout is IDENTICAL to v4. No fields were
+    /// added or removed — the pauser-tracking state was moved to a separate
+    /// PauserRegistry shared object (created here in the v4→v5 migration).
+    /// This is the correct pattern for Sui upgrade compatibility, as creating
+    /// new shared objects in a migration function is always allowed.
+    ///
     /// Migration chain (run in order):
     ///   - v2 → v3: creates AdminTimelock shared object (did not exist before v3)
-    ///   - v3 → v4: pauser_revoked bool field added — Sui upgrades allow adding
-    ///     new fields; the field defaults to `false` for existing shared objects.
-    ///   - v4 → v5: current_pauser_id Option<ID> added as a NEW field alongside
-    ///     the existing pauser_revoked (NOT replacing it). Both fields coexist for
-    ///     upgrade compatibility per Sui's struct-layout rules. The migration sets
-    ///     current_pauser_id = none() and keeps pauser_revoked as a dead field.
-    ///     After migration, the admin should re-issue PauserCaps via the timelock
-    ///     (ACTION_SET_PAUSER) to restore operator emergency access.
+    ///   - v3 → v4: pauser_revoked bool field (no structural migration needed)
+    ///   - v4 → v5: creates PauserRegistry shared object with current_pauser_id
+    ///     set to option::none(). After migration, the admin MUST re-issue
+    ///     PauserCaps via the timelock (ACTION_SET_PAUSER) to restore operator
+    ///     emergency access. There will be a ~delay_epochs window where NO ONE
+    ///     can emergency-pause — schedule the pauser re-issuance timelock action
+    ///     before or immediately alongside the upgrade transaction.
     #[allow(lint(public_entry))]
     #[ext(migration)]
     public entry fun migrate(
@@ -1253,21 +1302,25 @@ module auto_renewal::vault {
                 transfer::share_object(timelock);
             };
             if (config.version <= 3) {
-                // v3 → v4: pauser_revoked field auto-added by Sui upgrade (defaults to false)
-                // No structural migration needed — field defaults work for compatibility.
+                // v3 → v4: pauser_revoked bool field added via upgrade
+                // (new field auto-defaults to false, which is correct).
             };
             if (config.version <= 4) {
-                // v4 → v5: current_pauser_id is a NEW field (alongside pauser_revoked).
-                // Sui zero-initializes new fields for existing objects, so
-                // current_pauser_id defaults to option::none(). We explicitly set
-                // it to none() here for clarity. The old pauser_revoked field is
-                // kept as dead weight for upgrade compatibility.
-                config.current_pauser_id = option::none();
+                // v4 → v5: create PauserRegistry as a NEW shared object.
+                // This is allowed in an upgrade because we're creating a
+                // brand-new object, not modifying the existing FeeConfig layout.
+                // FeeConfig's struct layout remains EXACTLY as it was in v4.
+                let registry = PauserRegistry {
+                    id: object::new(_ctx),
+                    current_pauser_id: option::none(),
+                };
+                transfer::share_object(registry);
 
-                // IMPORTANT: If the old pauser_revoked was false (meaning a PauserCap
-                // existed and was not revoked), the admin MUST re-issue PauserCaps
-                // via the timelock after migration, because we cannot recover the
-                // old cap's object ID from the bool field alone.
+                // IMPORTANT: After this migration, the admin MUST call
+                // schedule_admin_action(ACTION_SET_PAUSER, ..., operator_address)
+                // → execute_admin_action to re-issue a PauserCap. The old
+                // pauser_revoked bool can't tell us the old cap's object ID.
+                // There is a ~delay_epochs pause gap — plan accordingly.
             };
             config.version = CONTRACT_VERSION;
         };
