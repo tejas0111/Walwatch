@@ -179,7 +179,7 @@ router.post('/:vaultId/withdraw', zValidator('json', withdrawSchema), async (c) 
     const userId = c.get('userId');
     const orgId = c.get('orgId');
     const authTime = c.get('authTime') as number | undefined;
-    const sessionAgeMs = authTime ? Date.now() - authTime * 1000 : 0;
+    const sessionAgeMs = authTime != null ? Date.now() - authTime * 1000 : Infinity;
     const result = await vaultService.withdrawFromVault(userId, orgId, vaultId, Number(body.amount), sessionAgeMs);
     await logAudit(c, 'vault.withdrawn', 'vault', vaultId, { amount: body.amount, digest: result.digest });
     return c.json(result);
