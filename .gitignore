@@ -56,3 +56,5 @@ agent.md
 
 # Git worktrees
 .worktrees/
+package.json
+package-lock.json
