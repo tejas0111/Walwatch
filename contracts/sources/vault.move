@@ -212,13 +212,17 @@ module auto_renewal::vault {
         keeper_fee: u64,
         /// Global pause flag — when true, all operations are blocked
         paused: bool,
+        /// DEPRECATED v4 field. Kept for upgrade compatibility (Sui does not
+        /// allow removing or replacing struct fields). All pause logic now
+        /// uses current_pauser_id below. This field is never read in v5+.
+        pauser_revoked: bool,
         /// The ID of the currently valid PauserCap, if any.
         /// When None, ALL existing PauserCaps are invalid. A new cap
         /// is issued via the timelock (ACTION_SET_PAUSER) which sets
         /// this to the new cap's ID. emergency_pause/unpause check
         /// that the caller's cap ID matches this value, preventing
         /// old (revoked) caps from working after a new one is issued.
-        /// This replaces the v4 boolean pauser_revoked field.
+        /// This replaces the v4 boolean pauser_revoked approach.
         current_pauser_id: Option<ID>,
         /// Estimated WAL cost per epoch of blob storage (in MIST)
         storage_price_per_epoch: u64,
@@ -398,6 +402,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
+            pauser_revoked: false,  // DEPRECATED v4 field — kept for upgrade compat
             current_pauser_id: option::none(),
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
@@ -904,6 +909,11 @@ module auto_renewal::vault {
     }
 
     /// Permissionless — anyone can call this to execute a due renewal.
+    /// Uses system::epoch(system) to determine the current Walrus epoch for
+    /// blob-due checks, which is the correct clock axis for comparing against
+    /// blob.end_epoch(). Do NOT use tx_context::epoch(ctx) here — that is
+    /// Sui's own consensus epoch, which is a separate clock from Walrus's
+    /// storage epoch and can diverge unpredictably.
     entry fun execute_renewal(
         vault: &mut RenewalVault,
         fee_config: &mut FeeConfig,
@@ -917,12 +927,18 @@ module auto_renewal::vault {
         assert!(vault.policy.active, ENotActive);
         assert!(vault.blob.is_some(), EBlobNotFound);
 
-        let current_epoch = tx_context::epoch(ctx);
+        // CRITICAL: Use system::epoch(system) (Walrus epoch axis), NOT
+        // tx_context::epoch(ctx) (Sui chain epoch axis). blob.end_epoch()
+        // is expressed on Walrus's epoch clock, and comparing it against
+        // Sui's epoch would produce incorrect renewal timing if the two
+        // clocks diverge (which they can — they are independent subsystems
+        // with different epoch durations and advancement triggers).
+        let walrus_epoch = system::epoch(system);
         let end_epoch = vault.blob.borrow().end_epoch();
 
         // 2. Check if renewal is actually due
         assert!(
-            (current_epoch as u64) + vault.policy.renew_threshold_epochs >= (end_epoch as u64),
+            (walrus_epoch as u64) + vault.policy.renew_threshold_epochs >= (end_epoch as u64),
             ENotDueForRenewal,
         );
 
@@ -1035,6 +1051,8 @@ module auto_renewal::vault {
     // ============================================================================
 
     /// Check if a vault is active and its blob is due for renewal.
+    /// Caller MUST pass the Walrus epoch (from system::epoch(system)), NOT
+    /// tx_context::epoch(ctx), for correct comparison against blob.end_epoch().
     public fun is_due(vault: &RenewalVault, current_epoch: u32): bool {
         if (!vault.policy.active) return false;
         if (vault.blob.is_none()) return false;
@@ -1167,6 +1185,7 @@ module auto_renewal::vault {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             keeper_fee: DEFAULT_KEEPER_FEE,
             paused: false,
+            pauser_revoked: false,  // DEPRECATED v4 field — kept for upgrade compat
             current_pauser_id: option::none(),
             storage_price_per_epoch: DEFAULT_STORAGE_PRICE_PER_EPOCH,
             version: CONTRACT_VERSION,
@@ -1199,17 +1218,14 @@ module auto_renewal::vault {
     ///
     /// Migration chain (run in order):
     ///   - v2 → v3: creates AdminTimelock shared object (did not exist before v3)
-    ///   - v3 → v4: (no structural migration needed — pauser_revoked field added via upgrade)
-    ///     Sui's forward-compatible field addition means the new bool field defaults to
-    ///     `false` for existing shared objects, which is the correct initial state.
-    ///   - v4 → v5: pauser_revoked bool field replaced by current_pauser_id Option<ID>
-    ///     NOTE: Struct field replacement is NOT supported in Sui upgrades. This migration
-    ///     path is only applicable for FRESH deployments at v5. Upgrading from a v4
-    ///     on-chain deployment requires a two-step process: first deploy a v3→v4 bridge
-    ///     upgrade that adds current_pauser_id while keeping pauser_revoked, then a
-    ///     separate upgrade to remove pauser_revoked (or just keep both fields).
-    ///     For the current v5 fresh deployment, FeeConfig correctly uses only
-    ///     current_pauser_id: Option<ID> without the deprecated bool.
+    ///   - v3 → v4: pauser_revoked bool field added — Sui upgrades allow adding
+    ///     new fields; the field defaults to `false` for existing shared objects.
+    ///   - v4 → v5: current_pauser_id Option<ID> added as a NEW field alongside
+    ///     the existing pauser_revoked (NOT replacing it). Both fields coexist for
+    ///     upgrade compatibility per Sui's struct-layout rules. The migration sets
+    ///     current_pauser_id = none() and keeps pauser_revoked as a dead field.
+    ///     After migration, the admin should re-issue PauserCaps via the timelock
+    ///     (ACTION_SET_PAUSER) to restore operator emergency access.
     #[allow(lint(public_entry))]
     #[ext(migration)]
     public entry fun migrate(
@@ -1241,12 +1257,17 @@ module auto_renewal::vault {
                 // No structural migration needed — field defaults work for compatibility.
             };
             if (config.version <= 4) {
-                // v4 → v5: current_pauser_id is a new field. For fresh deployments it's
-                // initialized correctly in init(). For upgrades, the field defaults to
-                // option::none() via Sui's zero-value initialization for Option<ID>,
-                // which is the correct initial state (no valid PauserCap out of the box).
-                // If upgrading from v4, the old pauser_revoked bool must still exist
-                // in the struct definition — see note at the top of this section.
+                // v4 → v5: current_pauser_id is a NEW field (alongside pauser_revoked).
+                // Sui zero-initializes new fields for existing objects, so
+                // current_pauser_id defaults to option::none(). We explicitly set
+                // it to none() here for clarity. The old pauser_revoked field is
+                // kept as dead weight for upgrade compatibility.
+                config.current_pauser_id = option::none();
+
+                // IMPORTANT: If the old pauser_revoked was false (meaning a PauserCap
+                // existed and was not revoked), the admin MUST re-issue PauserCaps
+                // via the timelock after migration, because we cannot recover the
+                // old cap's object ID from the bool field alone.
             };
             config.version = CONTRACT_VERSION;
         };
