@@ -1,5 +1,6 @@
-import { computeZkLoginAddress, jwtToAddress, getZkLoginSignature } from '@mysten/sui/zklogin';
+import { computeZkLoginAddress, jwtToAddress, getZkLoginSignature, generateNonce, generateRandomness } from '@mysten/sui/zklogin';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { PublicKey } from '@mysten/sui/cryptography';
 import { createHash, randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 
@@ -47,6 +48,18 @@ export function getIssuer(provider: string): string {
     case 'github': return 'https://github.com/login/oauth';
     default: throw new Error(`Unknown OAuth provider: ${provider}`);
   }
+}
+
+export function computeNonce(
+  publicKey: PublicKey,
+  maxEpoch: number,
+  randomness: string,
+): string {
+  return generateNonce(publicKey, maxEpoch, randomness);
+}
+
+export function generateNonceRandomness(): string {
+  return generateRandomness();
 }
 
 export function generateEphemeralKeypair(): { keypair: Ed25519Keypair; secretKey: string } {

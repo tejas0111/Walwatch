@@ -198,6 +198,14 @@ export class ApiClient {
     return this.request('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
   }
 
+  prepareZkLogin(): Promise<{ nonce: string; ephemeralPublicKey: string; jwtRandomness: string; maxEpoch: number }> {
+    return this.request('/auth/zklogin/prepare', { method: 'POST', body: '{}' })
+  }
+
+  loginWithGoogle(idToken: string, nonce: string, ephemeralPublicKey: string): Promise<{ user: User; token: string }> {
+    return this.request('/auth/google', { method: 'POST', body: JSON.stringify({ idToken, nonce, ephemeralPublicKey }) })
+  }
+
   logout(): Promise<void> {
     return this.request('/auth/logout', { method: 'POST' })
   }

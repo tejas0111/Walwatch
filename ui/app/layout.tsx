@@ -1,6 +1,7 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { Inter } from 'next/font/google'
+import { GoogleOAuthProvider } from '@react-oauth/google'
 import { AuthProvider } from '@/lib/auth-provider'
 import './globals.css'
 
@@ -26,7 +27,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="bg-background dark">
       <body className={`${inter.className} antialiased`}>
-        <AuthProvider>{children}</AuthProvider>
+        <GoogleOAuthProvider clientId={process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ''}>
+          <AuthProvider>{children}</AuthProvider>
+        </GoogleOAuthProvider>
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>

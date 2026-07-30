@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
+import Redis from 'ioredis';
 import { OAuth2Client } from 'google-auth-library';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { register, login } from '../services/auth-service.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logAudit, logAuditSystem } from '../middleware/audit.js';
@@ -12,7 +14,7 @@ import { users, orgMembers } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { AppError } from '../lib/errors.js';
 import { rateLimit } from '../middleware/rate-limit.js';
-import { computeSalt, deriveZkLoginAddress, getIssuer, generateEphemeralKeypair, generateJwtRandomness, generateZkProof, getEphemeralPublicKey } from '../services/zklogin-service.js';
+import { computeSalt, deriveZkLoginAddress, getIssuer, generateEphemeralKeypair, generateJwtRandomness, generateZkProof, getEphemeralPublicKey, computeNonce, generateNonceRandomness } from '../services/zklogin-service.js';
 import { encrypt } from '../lib/encryption.js';
 import { config } from '../config.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -45,7 +47,11 @@ const loginSchema = z.object({
 
 const googleAuthSchema = z.object({
   idToken: z.string().min(1),
+  nonce: z.string().optional(),
+  ephemeralPublicKey: z.string().optional(),
 });
+
+const zkloginPrepareSchema = z.object({});
 
 router.post('/register',
   rateLimit({ windowMs: 15 * 60 * 1000, max: 5 }),
@@ -87,12 +93,45 @@ router.post('/login',
   },
 );
 
+router.post('/zklogin/prepare',
+  rateLimit({ windowMs: 60 * 1000, max: 10 }),
+  async (c) => {
+    try {
+      const { keypair, secretKey } = generateEphemeralKeypair();
+      const ephemeralPublicKey = getEphemeralPublicKey(keypair);
+      const jwtRandomness = generateNonceRandomness();
+      const maxEpoch = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
+
+      const nonce = computeNonce(keypair.getPublicKey(), maxEpoch, jwtRandomness);
+
+      const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+      await redis.hmset(`zklogin:session:${nonce}`, {
+        ephemeralSecretKey: Buffer.from(keypair.getSecretKey()).toString('hex'),
+        jwtRandomness,
+        maxEpoch: maxEpoch.toString(),
+        iat: Date.now().toString(),
+      });
+      await redis.expire(`zklogin:session:${nonce}`, 300);
+      await redis.quit();
+
+      return c.json({
+        nonce,
+        ephemeralPublicKey: Buffer.from(ephemeralPublicKey).toString('hex'),
+        jwtRandomness,
+        maxEpoch,
+      });
+    } catch (error) {
+      throw error;
+    }
+  },
+);
+
 router.post('/google',
   rateLimit({ windowMs: 60 * 1000, max: 10 }),
   zValidator('json', googleAuthSchema),
   async (c) => {
     try {
-      const { idToken } = c.req.valid('json');
+      const { idToken, nonce: clientNonce, ephemeralPublicKey: clientEphemeralPublicKeyHex } = c.req.valid('json');
 
       if (!GOOGLE_CLIENT_ID) {
         return c.json({ error: { message: 'Google OAuth not configured', code: 'OAUTH_NOT_CONFIGURED' } }, 500);
@@ -111,6 +150,42 @@ router.post('/google',
       const email = payload.email;
       const name = payload.name;
 
+      let nonceFlowData: { keypair: Ed25519Keypair; jwtRandomness: string; maxEpoch: number } | null = null;
+
+      if (clientNonce) {
+        if (!clientEphemeralPublicKeyHex) {
+          return c.json({ error: { message: 'ephemeralPublicKey required with nonce', code: 'MISSING_EPHEMERAL_KEY' } }, 400);
+        }
+
+        const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+        const session = await redis.hgetall(`zklogin:session:${clientNonce}`);
+
+        if (!session || !session.ephemeralSecretKey || !session.jwtRandomness || !session.maxEpoch) {
+          return c.json({ error: { message: 'Invalid or expired nonce', code: 'INVALID_NONCE' } }, 400);
+        }
+
+        const iat = parseInt(session.iat || '0');
+        if (Date.now() - iat > 300000) {
+          await redis.del(`zklogin:session:${clientNonce}`);
+          return c.json({ error: { message: 'Nonce expired', code: 'NONCE_EXPIRED' } }, 400);
+        }
+
+        const keypair = Ed25519Keypair.fromSecretKey(session.ephemeralSecretKey);
+        const computedNonce = computeNonce(keypair.getPublicKey(), parseInt(session.maxEpoch), session.jwtRandomness);
+        if (computedNonce !== clientNonce) {
+          return c.json({ error: { message: 'Nonce mismatch', code: 'NONCE_MISMATCH' } }, 400);
+        }
+
+        if (payload.nonce !== clientNonce) {
+          return c.json({ error: { message: 'Google token nonce mismatch', code: 'GOOGLE_NONCE_MISMATCH' } }, 400);
+        }
+
+        await redis.del(`zklogin:session:${clientNonce}`);
+        await redis.quit();
+
+        nonceFlowData = { keypair, jwtRandomness: session.jwtRandomness, maxEpoch: parseInt(session.maxEpoch) };
+      }
+
       const db = getDb();
 
       let [user] = await db.select().from(users).where(
@@ -123,14 +198,30 @@ router.post('/google',
         const iss = getIssuer('google');
         const zkloginAddress = deriveZkLoginAddress(iss, subject, aud, salt);
 
-        const { keypair, secretKey } = generateEphemeralKeypair();
+        let keypair: Ed25519Keypair;
+        let secretKey: string;
+        let jwtRandomness: string;
+        let ephemeralPublicKey: Uint8Array;
+        let userMaxEpoch: number;
+
+        if (nonceFlowData) {
+          keypair = nonceFlowData.keypair;
+          secretKey = Buffer.from(keypair.getSecretKey()).toString('hex');
+          jwtRandomness = nonceFlowData.jwtRandomness;
+          ephemeralPublicKey = getEphemeralPublicKey(keypair);
+          userMaxEpoch = nonceFlowData.maxEpoch;
+        } else {
+          const gen = generateEphemeralKeypair();
+          keypair = gen.keypair;
+          secretKey = gen.secretKey;
+          jwtRandomness = generateJwtRandomness();
+          ephemeralPublicKey = getEphemeralPublicKey(keypair);
+          userMaxEpoch = 0;
+        }
+
         const encryptedKeypair = encrypt(secretKey);
 
-        const jwtRandomness = generateJwtRandomness();
-        const ephemeralPublicKey = getEphemeralPublicKey(keypair);
-
         let zkProof: any = null;
-        let maxEpoch = 0;
         try {
           const proofResult = await generateZkProof(
             idToken,
@@ -139,7 +230,7 @@ router.post('/google',
             salt,
           );
           zkProof = proofResult.proof;
-          maxEpoch = proofResult.maxEpoch;
+          userMaxEpoch = proofResult.maxEpoch;
         } catch (proofErr) {
           console.error('[auth] ZK proof generation failed (non-blocking):', proofErr);
         }
@@ -156,7 +247,7 @@ router.post('/google',
           ephemeralKeyExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
           zkloginProofEncrypted: zkProof ? encrypt(JSON.stringify(zkProof)) : null,
           zkloginJwtRandomness: jwtRandomness,
-          zkloginMaxEpoch: maxEpoch || null,
+          zkloginMaxEpoch: userMaxEpoch || null,
           lastKeyExportAt: null,
         }).returning();
 

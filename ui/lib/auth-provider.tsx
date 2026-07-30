@@ -9,6 +9,7 @@ interface AuthContextType {
   orgs: Organization[]
   loading: boolean
   login: (email: string, password: string) => Promise<void>
+  loginWithGoogle: (idToken: string, nonce: string, ephemeralPublicKey: string) => Promise<void>
   register: (email: string, password: string) => Promise<void>
   logout: () => void
   createOrg: (name: string, slug: string) => Promise<Organization>
@@ -92,6 +93,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await refreshOrgs()
   }, [refreshUser, refreshOrgs])
 
+  const loginWithGoogle = useCallback(async (idToken: string, nonce: string, ephemeralPublicKey: string) => {
+    const { token } = await api.loginWithGoogle(idToken, nonce, ephemeralPublicKey)
+    api.setToken(token)
+    localStorage.setItem('walwatch_token', token)
+    await refreshUser()
+    await refreshOrgs()
+  }, [refreshUser, refreshOrgs])
+
   const register = useCallback(async (email: string, password: string) => {
     const { token } = await api.register(email, password)
     api.setToken(token)
@@ -126,9 +135,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo(() => ({
     user, org, orgs, loading,
-    login, register, logout, createOrg, switchOrg,
+    login, loginWithGoogle, register, logout, createOrg, switchOrg,
     refreshOrgs, refreshUser,
-  }), [user, org, orgs, loading, login, register, logout, createOrg, switchOrg, refreshOrgs, refreshUser])
+  }), [user, org, orgs, loading, login, loginWithGoogle, register, logout, createOrg, switchOrg, refreshOrgs, refreshUser])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

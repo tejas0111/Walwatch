@@ -1,9 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { GoogleLogin } from '@react-oauth/google'
 import { useAuth } from '@/lib/auth-provider'
+import { api } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -12,11 +14,35 @@ import { Separator } from '@/components/ui/separator'
 
 export default function LoginPage() {
   const router = useRouter()
-  const { login } = useAuth()
+  const { login, loginWithGoogle } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [nonce, setNonce] = useState<string | null>(null)
+  const [ephemeralPublicKey, setEphemeralPublicKey] = useState<string | null>(null)
+  const [googleLoading, setGoogleLoading] = useState(false)
+
+  useEffect(() => {
+    api.prepareZkLogin().then(result => {
+      setNonce(result.nonce)
+      setEphemeralPublicKey(result.ephemeralPublicKey)
+    }).catch(() => {})
+  }, [])
+
+  const handleGoogleSuccess = useCallback(async (credentialResponse: any) => {
+    if (!credentialResponse?.credential || !nonce || !ephemeralPublicKey) return
+    setGoogleLoading(true)
+    setError('')
+    try {
+      await loginWithGoogle(credentialResponse.credential, nonce, ephemeralPublicKey)
+      router.push('/dashboard')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google sign-in failed')
+    } finally {
+      setGoogleLoading(false)
+    }
+  }, [nonce, ephemeralPublicKey, loginWithGoogle, router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -90,6 +116,31 @@ export default function LoginPage() {
               {submitting ? 'Signing in...' : 'Sign in'}
             </Button>
           </form>
+
+          <div className="relative my-2">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t border-border" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-card/80 px-2 text-muted-foreground">Or continue with</span>
+            </div>
+          </div>
+
+          <div className="flex justify-center">
+            {nonce ? (
+              <GoogleLogin
+                nonce={nonce}
+                onSuccess={handleGoogleSuccess}
+                onError={() => setError('Google sign-in failed')}
+                size="large"
+                width={320}
+                theme="filled_black"
+                shape="rectangular"
+              />
+            ) : (
+              <Button variant="outline" disabled className="w-full">Loading Google Sign-In...</Button>
+            )}
+          </div>
         </CardContent>
 
         <CardFooter className="flex flex-col gap-4">
