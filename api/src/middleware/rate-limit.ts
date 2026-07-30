@@ -14,6 +14,9 @@ import crypto from 'node:crypto';
 import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { ErrorCodes, FailureClasses } from '../lib/errors.js';
+import pino from 'pino';
+
+const log = pino({ name: 'rate-limit' });
 
 interface RateLimitOptions {
   windowMs: number;
@@ -137,7 +140,7 @@ class RedisStore implements RateLimitStore {
         maxRetriesPerRequest: 3,
         retryStrategy(times) {
           if (times > 5) {
-            console.error('[rate-limit] Max Redis reconnection attempts reached');
+            log.error('Max Redis reconnection attempts reached');
             return null;
           }
           return Math.min(100 * Math.pow(2, times), 3000);
@@ -145,11 +148,11 @@ class RedisStore implements RateLimitStore {
       });
 
       r.on('error', (err: Error) => {
-        console.error('[rate-limit] Redis client error:', err.message);
+        log.error({ err: err.message }, 'Redis client error');
       });
 
       r.on('end', () => {
-        console.warn('[rate-limit] Redis connection permanently lost — falling back to in-memory');
+        log.warn('Redis connection permanently lost — falling back to in-memory');
         this.fallbackActive = true;
         this.initTime = Date.now();
         this.client = null;
@@ -159,9 +162,9 @@ class RedisStore implements RateLimitStore {
       this.client = r;
       this.fallbackActive = false;
       this.initTime = Date.now();
-      console.log('[rate-limit] Redis client connected');
+      log.info('Redis client connected');
     } catch (err) {
-      console.error('[rate-limit] Failed to initialize Redis client — falling back to in-memory store');
+      log.error({ err }, 'Failed to initialize Redis client — falling back to in-memory store');
       this.client = null;
       this.fallbackActive = true;
       this.initTime = Date.now();
@@ -176,7 +179,7 @@ class RedisStore implements RateLimitStore {
       if (!this.fallbackActive) {
         this.fallbackActive = true;
         this.initTime = Date.now();
-        console.warn('[rate-limit] Redis unavailable — using in-memory fallback');
+        log.warn('Redis unavailable — using in-memory fallback');
       }
       return this.fallbackStore.increment(key, windowMs, max);
     }
@@ -186,7 +189,7 @@ class RedisStore implements RateLimitStore {
       const ttl = Number(results[1]);
       return { count, ttl: Math.max(0, ttl) };
     } catch (err) {
-      console.error('[rate-limit] Redis eval failed — falling back to in-memory:', (err as Error).message);
+      log.error({ err: (err as Error).message }, 'Redis eval failed — falling back to in-memory');
       this.fallbackActive = true;
       this.initTime = Date.now();
       this.client = null;

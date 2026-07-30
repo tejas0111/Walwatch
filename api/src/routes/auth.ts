@@ -15,6 +15,9 @@ import { eq, and } from 'drizzle-orm';
 import { AppError } from '../lib/errors.js';
 import { rateLimit } from '../middleware/rate-limit.js';
 import { computeSalt, deriveZkLoginAddress, getIssuer, generateEphemeralKeypair, generateJwtRandomness, generateZkProof, getEphemeralPublicKey, computeNonce, generateNonceRandomness } from '../services/zklogin-service.js';
+import pino from 'pino';
+
+const log = pino({ name: 'auth-routes' });
 import { getRedisClient } from '../lib/redis-client.js';
 import { encrypt } from '../lib/encryption.js';
 import { config } from '../config.js';
@@ -230,7 +233,7 @@ router.post('/google',
           );
           zkProof = proofResult.proof;
         } catch (proofErr) {
-          console.error('[auth] ZK proof generation failed (non-blocking):', proofErr);
+          log.error({ err: proofErr }, 'ZK proof generation failed (non-blocking)');
         }
 
         const [newUser] = await db.insert(users).values({
@@ -444,5 +447,68 @@ router.get('/me', requireAuth, async (c) => {
 router.post('/logout', requireAuth, async (c) => {
   return c.json({ message: 'Logged out' });
 });
+
+// ── JWKS endpoint (key rotation support) ────────────────────────────
+router.get('/.well-known/jwks.json', async (c) => {
+  // HS256 is symmetric — clients cannot verify signatures client-side.
+  // The JWKS endpoint returns the key ID(s) and algorithm for reference.
+  // Clients SHOULD validate the kid header matches a known key ID.
+  const keys = [
+    {
+      kty: 'oct',
+      kid: config.jwtKeyId || 'default',
+      alg: 'HS256',
+      use: 'sig',
+      // No k (key value) exposed for HS256 — symmetric keys are secret.
+      // This is a metadata-only endpoint for kid tracking.
+    },
+  ];
+  return c.json({ keys });
+});
+
+// ── JWT key rotation endpoint ───────────────────────────────────────
+const rotateKeysSchema = z.object({
+  newSecret: z.string().min(32, 'New JWT secret must be at least 32 characters'),
+  justification: z.string().min(1),
+});
+
+router.post('/rotate-keys',
+  requireAuth,
+  rateLimit({ windowMs: 60 * 60 * 1000, max: 3 }),
+  zValidator('json', rotateKeysSchema),
+  async (c) => {
+    try {
+      const { newSecret, justification } = c.req.valid('json');
+      const userId = c.get('userId');
+
+      // Log the rotation request (actual env var change requires manual restart)
+      await logAuditSystem(
+        'system',
+        'jwt.rotation_requested',
+        'jwt_secret',
+        undefined,
+        { initiatedBy: userId, justification, oldKid: config.jwtKeyId },
+      );
+
+      return c.json({
+        message: 'JWT rotation requested. To complete rotation:\n' +
+          '1. Add the old JWT_SECRET to JWT_OLD_SECRETS (comma-separated)\n' +
+          '2. Set JWT_SECRET to the new value\n' +
+          '3. Optionally increment JWT_KEY_ID\n' +
+          '4. Restart the API server\n' +
+          'Old tokens will remain valid until they expire or you remove them from JWT_OLD_SECRETS.',
+        instructions: {
+          addToOldSecrets: 'Add the previous JWT_SECRET value to JWT_OLD_SECRETS env var',
+          setNewSecret: 'Set JWT_SECRET to the new value you provided',
+          rotateKeyId: 'Optionally increment JWT_KEY_ID for kid tracking',
+          restartRequired: true,
+        },
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw error;
+    }
+  },
+);
 
 export { router as authRoutes };

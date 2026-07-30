@@ -7,6 +7,28 @@ import { apiKeys } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { ErrorCodes } from '../lib/errors.js';
 
+/**
+ * Verify a JWT against the current and any old (rotation) secrets.
+ * Returns the decoded payload on success, null on failure.
+ */
+function verifyJwt(token: string): { userId: string; auth_time?: number } | null {
+  const secrets = [config.jwtSecret, ...config.jwtOldSecrets];
+  for (const secret of secrets) {
+    try {
+      const payload = jwt.verify(token, secret, {
+        algorithms: ['HS256'],
+        issuer: 'walwatch',
+        audience: 'walwatch-api',
+      }) as { userId: string; auth_time?: number };
+      return payload;
+    } catch {
+      // Try next secret in rotation
+      continue;
+    }
+  }
+  return null;
+}
+
 export interface AuthUser {
   userId: string;
   email: string;
@@ -29,20 +51,15 @@ export async function requireAuth(c: Context<{ Variables: Variables }>, next: Ne
   }
 
   const token = authHeader.slice(7);
-  try {
-    const payload = jwt.verify(token, config.jwtSecret, {
-        algorithms: ['HS256'],
-        issuer: 'walwatch',
-        audience: 'walwatch-api',
-      }) as { userId: string; auth_time?: number };
-    c.set('userId', payload.userId);
-    if (payload.auth_time !== undefined) {
-      c.set('authTime', payload.auth_time);
-    }
-    await next();
-  } catch {
+  const payload = verifyJwt(token);
+  if (!payload) {
     return c.json({ error: { message: 'Invalid or expired token', code: ErrorCodes.UNAUTHORIZED, failureClass: 'persistent', requestId: getRequestId(c) } }, 401);
   }
+  c.set('userId', payload.userId);
+  if (payload.auth_time !== undefined) {
+    c.set('authTime', payload.auth_time);
+  }
+  await next();
 }
 
 export async function requireReAuth(c: Context, next: Next) {
@@ -58,19 +75,14 @@ export async function requireAuthOrApiKey(c: Context, next: Next) {
   const apiKey = c.req.header('X-API-Key');
 
   if (authHeader?.startsWith('Bearer ')) {
-    try {
-      const token = authHeader.slice(7);
-      const payload = jwt.verify(token, config.jwtSecret, {
-        algorithms: ['HS256'],
-        issuer: 'walwatch',
-        audience: 'walwatch-api',
-      }) as { userId: string };
-      c.set('userId', payload.userId);
-      await next();
-      return;
-    } catch {
+    const token = authHeader.slice(7);
+    const payload = verifyJwt(token);
+    if (!payload) {
       return c.json({ error: { message: 'Invalid or expired token', code: ErrorCodes.UNAUTHORIZED, failureClass: 'persistent', requestId: getRequestId(c) } }, 401);
     }
+    c.set('userId', payload.userId);
+    await next();
+    return;
   }
 
   if (apiKey) {

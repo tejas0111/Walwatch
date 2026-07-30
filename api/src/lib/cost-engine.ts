@@ -4,7 +4,8 @@ import { budgets, spendingLimits, renewalJobs, blobRegistrations, publishers, co
 import { emit, EventNames, createEvent } from './event-bus.js';
 import { AppError, ErrorCodes } from './errors.js';
 
-const logger = { error: (msg: string, ...args: any[]) => console.error(msg, ...args) };
+import pino from 'pino';
+const logger = pino({ name: 'cost-engine' });
 
 /**
  * Default maximum staleness for cost estimates (5 minutes).

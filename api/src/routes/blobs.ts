@@ -176,12 +176,31 @@ router.get('/', requireOrg, async (c) => {
 router.get('/export', requireOrg, requireRole('owner', 'admin'), async (c) => {
   const orgId = c.get('orgId');
   const db = getDb();
-  const allBlobs = await db.select().from(blobRegistrations).where(eq(blobRegistrations.orgId, orgId));
-  const MAX_EXPORT = 10000;
-  if (allBlobs.length > MAX_EXPORT) {
-    return c.json({ blobs: allBlobs.slice(0, MAX_EXPORT), truncated: true, total: allBlobs.length });
-  }
-  return c.json({ blobs: allBlobs });
+
+  // Use cursor-based pagination for export (Spec 14: all list endpoints use cursor pagination)
+  const { cursor, limit } = parsePagination(c.req.query('cursor'), c.req.query('limit'));
+  // Cap export page size at 1000 to prevent OOM on large datasets
+  const exportLimit = Math.min(limit, 1000);
+  const decodedCursor = cursor ? decodeCursor(cursor) : null;
+  const fetchLimit = exportLimit + 1;
+
+  const cursorWhere = buildCursorWhere(decodedCursor, blobRegistrations.createdAt, blobRegistrations.id, 'desc');
+  const baseConditions = eq(blobRegistrations.orgId, orgId);
+  const finalWhere = cursorWhere ? and(baseConditions, cursorWhere) : baseConditions;
+  const orderBy = buildCursorOrderBy(blobRegistrations.createdAt, blobRegistrations.id, 'desc');
+
+  const blobs = await db.select()
+    .from(blobRegistrations)
+    .where(finalWhere)
+    .orderBy(...orderBy)
+    .limit(fetchLimit);
+
+  const paginated = wrapPaginatedResponse(blobs, exportLimit, (b) => b.id, (b) => b.createdAt.toISOString());
+
+  return c.json({
+    blobs: paginated.data,
+    pagination: { nextCursor: paginated.nextCursor, hasMore: paginated.hasMore },
+  });
 });
 
 router.get('/:id', requireOrg, async (c) => {

@@ -25,6 +25,9 @@ import {
   wrapPaginatedResponse,
   parsePagination,
 } from '../lib/cursor-pagination.js';
+import pino from 'pino';
+
+const log = pino({ name: 'activity-feed' });
 
 const router = new Hono();
 
@@ -104,6 +107,6 @@ export async function writeFeedEntry(
     });
   } catch (err) {
     // Feed writes are best-effort — losing a feed entry is acceptable (Spec 18)
-    console.error('[activity-feed] Failed to write entry:', err);
+    log.error({ err }, 'Failed to write entry');
   }
 }

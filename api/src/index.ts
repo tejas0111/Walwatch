@@ -83,6 +83,25 @@ app.use('*', idempotencyMiddleware);
 app.use('/api/auth/*', bodyLimit({ maxSize: 10 * 1024 }));
 app.use('*', bodyLimit({ maxSize: 1024 * 1024 }));
 
+// Global request timeout (30s for most endpoints, 60s for long-running operations)
+app.use('*', createMiddleware(async (c, next) => {
+  const timeoutMs = c.req.path.startsWith('/api/admin') ? 60_000 : 30_000;
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`Request timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([
+      next(),
+      timeoutPromise,
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle!);
+  }
+}));
+
 // Security headers
 app.use('*', createMiddleware(async (c, next) => {
   await next();

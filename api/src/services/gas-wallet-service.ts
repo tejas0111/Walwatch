@@ -16,58 +16,63 @@ export interface GasObjectRef {
 let primaryKeypair: Ed25519Keypair | null = null;
 let standbyKeypair: Ed25519Keypair | null = null;
 
-const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY;
-const GAS_WALLET_STANDBY_KEY = process.env.GAS_WALLET_STANDBY_KEY;
-delete process.env.GAS_WALLET_PRIMARY_KEY;
-delete process.env.GAS_WALLET_STANDBY_KEY;
+// Read private keys and create keypairs immediately, then scrub env and raw strings.
+// This prevents exposure via /proc/self/environ or other process.env readers.
+(function init(): void {
+  const rawPrimary = process.env.GAS_WALLET_PRIMARY_KEY;
+  const rawStandby = process.env.GAS_WALLET_STANDBY_KEY;
+  delete process.env.GAS_WALLET_PRIMARY_KEY;
+  delete process.env.GAS_WALLET_STANDBY_KEY;
+
+  if (rawPrimary) {
+    primaryKeypair = Ed25519Keypair.fromSecretKey(
+      Uint8Array.from(Buffer.from(rawPrimary, 'hex')),
+    );
+  }
+  if (rawStandby) {
+    standbyKeypair = Ed25519Keypair.fromSecretKey(
+      Uint8Array.from(Buffer.from(rawStandby, 'hex')),
+    );
+  }
+  // rawPrimary and rawStandby go out of scope here — eligible for GC.
+  // The keypairs still hold private keys in memory (unavoidable in JS),
+  // but the hex-encoded source strings are released from the IIFE scope.
+})();
+
 // Cold reserve top-up is a manual/offline step — the cold key MUST NOT
 // reside in the hot API process. Use a separate script or hardware wallet
 // to periodically refill the primary gas wallet.
 
 /**
- * Export gas wallet primary key bytes for use by other services.
- * The key is already loaded from process.env at module init and scrubbed.
- * This avoids the double-delete issue where vaultService.ts also tried
- * to read and delete the env var.
+ * Get the primary gas wallet keypair (already initialized at module load).
+ * Prefer this over getGasWalletPrimaryKeyBytes() to avoid exposing raw key bytes.
  */
-export function getGasWalletPrimaryKeyBytes(): Uint8Array {
-  if (!GAS_WALLET_PRIMARY_KEY) {
-    throw new Error('GAS_WALLET_PRIMARY_KEY not set — gas wallet unavailable');
-  }
-  return Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
-}
-
-function ensurePrimary(): Ed25519Keypair {
+export function getPrimaryGasWalletKeypair(): Ed25519Keypair {
   if (!primaryKeypair) {
-    if (!GAS_WALLET_PRIMARY_KEY) {
-      throw new Error('GAS_WALLET_PRIMARY_KEY not set');
-    }
-    const bytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
-    primaryKeypair = Ed25519Keypair.fromSecretKey(bytes);
+    throw new Error('GAS_WALLET_PRIMARY_KEY not set — gas wallet unavailable');
   }
   return primaryKeypair;
 }
 
-function ensureStandby(): Ed25519Keypair | null {
-  if (!standbyKeypair && GAS_WALLET_STANDBY_KEY) {
-    const bytes = Uint8Array.from(Buffer.from(GAS_WALLET_STANDBY_KEY, 'hex'));
-    standbyKeypair = Ed25519Keypair.fromSecretKey(bytes);
-  }
-  return standbyKeypair;
+/**
+ * Export gas wallet primary key bytes for use by other services.
+ * @deprecated Use getPrimaryGasWalletKeypair() instead to avoid raw byte exposure.
+ */
+export function getGasWalletPrimaryKeyBytes(): string {
+  return getPrimaryGasWalletKeypair().getSecretKey();
 }
 
 export function getGasWallet(): { keypair: Ed25519Keypair; address: string } {
-  const kp = ensurePrimary();
+  const kp = getPrimaryGasWalletKeypair();
   return { keypair: kp, address: kp.toSuiAddress() };
 }
 
 export async function checkBalance(): Promise<{ primary: bigint; standby: bigint; status: string }> {
-  const kp = ensurePrimary();
+  const kp = getPrimaryGasWalletKeypair();
   const primary = await client.getBalance({ owner: kp.toSuiAddress() });
   const standbyBalance = (() => {
-    const sk = ensureStandby();
-    if (!sk) return BigInt(0);
-    return client.getBalance({ owner: sk.toSuiAddress() }).then(r => BigInt(r.totalBalance));
+    if (!standbyKeypair) return BigInt(0);
+    return client.getBalance({ owner: standbyKeypair.toSuiAddress() }).then(r => BigInt(r.totalBalance));
   })();
   const status = BigInt(primary.totalBalance) < config.gasWalletMinBalanceMist ? 'LOW' : 'OK';
   return { primary: BigInt(primary.totalBalance), standby: BigInt(await standbyBalance), status };

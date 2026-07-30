@@ -46,6 +46,11 @@ import { createRenewalJob } from './db-writer.js';
 import { findBlobRegistrationByBlobId } from './vault-mapper.js';
 import { SchedulerEngine } from './scheduler.js';
 import { getDb } from './db.js';
+// ── Shared library imports ───────────────────────────────────────────
+// These modules are imported from the API package to avoid code duplication.
+// They reside in api/src/lib/ and are considered a shared dependency.
+// The API must be built/deployed alongside the keeper.
+// In future, these should be extracted into a separate @walwatch/shared package.
 import { emit, createEvent } from '../../api/src/lib/event-bus.js';
 import { validateTransition } from '../../api/src/lib/state-machine.js';
 import { policyEngine, type ResolvedPolicy } from '../../api/src/lib/policy-engine.js';

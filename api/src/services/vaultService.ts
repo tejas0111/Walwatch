@@ -6,7 +6,7 @@ import pino from 'pino';
 import { withRetry } from '../lib/retry.js';
 import { SuiClientPool, createPoolFromEnv } from '../lib/sui-pool.js';
 import { config } from '../config.js';
-import { selectGasCoin, getGasWalletPrimaryKeyBytes } from './gas-wallet-service.js';
+import { selectGasCoin, getPrimaryGasWalletKeypair } from './gas-wallet-service.js';
 import { getDb } from '../db/index.js';
 import { users, subscriptions } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -196,8 +196,7 @@ async function buildAndReturnTxBytes(
   tx.setSender(zkloginAddress);
   tx.setGasBudget(gasBudget);
 
-  const gasWalletBytes = getGasWalletPrimaryKeyBytes();
-  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasWalletKp = getPrimaryGasWalletKeypair();
   const gasWalletAddress = gasWalletKp.toSuiAddress();
 
   return withAddressLock(gasWalletAddress, async () => {
@@ -226,8 +225,7 @@ async function submitUserSignedTx(
     userSignature,
   });
 
-  const gasWalletBytes = getGasWalletPrimaryKeyBytes();
-  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasWalletKp = getPrimaryGasWalletKeypair();
   const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
 
   return pool.call(async (client) => {

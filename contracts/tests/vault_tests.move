@@ -1,6 +1,7 @@
 // === Auto-Renewal Vault — Test Suite ===
 
 #[test_only]
+#[allow(unused_mut_ref)]
 module auto_renewal::vault_tests {
 
     use sui::test_scenario::{Self, ctx, next_tx, next_epoch, end};
