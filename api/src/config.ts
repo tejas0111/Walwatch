@@ -31,6 +31,9 @@ export const config = {
     if (!secret && ((process.env.NODE_ENV || 'development') === 'production' || (process.env.NODE_ENV || '').startsWith('prod') || process.env.NODE_ENV === 'staging')) {
       throw new Error('JWT_SECRET environment variable is required in production/staging');
     }
+    if (!secret && process.env.NODE_ENV !== 'production') {
+      console.warn('[config] ⚠️  WARNING: Using DEV JWT secret. Set JWT_SECRET in production.');
+    }
     return secret || 'dev-secret-change-in-production';
   })(),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
@@ -70,4 +73,24 @@ export const config = {
    * Set to empty string (default) to omit kid from header.
    */
   jwtKeyId: process.env.JWT_KEY_ID || '',
+  /**
+   * Previous JWT secrets for key rotation (comma-separated).
+   * When rotating JWT_SECRET, add the old value(s) here so existing
+   * tokens remain valid until they expire naturally.
+   * Format: "old-secret-1,old-secret-2"
+   */
+  jwtOldSecrets: (() => {
+    const raw = process.env.JWT_OLD_SECRETS;
+    if (!raw) return [];
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  })(),
+
+  /**
+   * Gas budget for create_vault transactions in MIST.
+   */
+  gasBudgetCreateVault: parseInt(process.env.GAS_BUDGET_CREATE_VAULT || '10000000', 10),
+  /**
+   * Default gas budget for other vault transactions (deposit, withdraw, etc.) in MIST.
+   */
+  gasBudgetDefault: parseInt(process.env.GAS_BUDGET_DEFAULT || '5000000', 10),
 };

@@ -10,6 +10,9 @@ import { adminRetryRenewalJob, type AdminOperator } from '../lib/admin-actions.j
 import { logAuditSystem } from '../middleware/audit.js';
 import { AppError } from '../lib/errors.js';
 import { reEncrypt } from '../lib/encryption.js';
+import pino from 'pino';
+
+const log = pino({ name: 'admin-routes' });
 
 /**
  * Extract admin operator identity from the request context.
@@ -188,7 +191,7 @@ adminRoutes.post('/encryption/rotate-key', async (c) => {
           newConfig[key] = reEncrypt(value);
           changed = true;
         } catch (err) {
-          console.error(`[key-rotation] Failed to re-encrypt field "${key}" on notification channel ${channel.id}:`, err);
+          log.error({ err, channelId: channel.id, field: key }, 'Failed to re-encrypt field on notification channel');
           failedFields.push(`${channel.id}.${key}`);
           newConfig[key] = value;
         }
@@ -214,7 +217,7 @@ adminRoutes.post('/encryption/rotate-key', async (c) => {
           .where(eq(webhooks.id, wh.id));
         reEncryptedCount++;
       } catch (err) {
-        console.error(`[key-rotation] Failed to re-encrypt webhook secret for webhook ${wh.id}:`, err);
+        log.error({ err, webhookId: wh.id }, 'Failed to re-encrypt webhook secret');
         failedFields.push(`${wh.id}.secret`);
       }
     }

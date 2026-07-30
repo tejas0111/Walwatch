@@ -17,7 +17,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireOrg, requireRole } from '../middleware/org-scope.js';
 import { getDb } from '../db/index.js';
 import { activityFeed } from '../db/schema.js';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, ilike } from 'drizzle-orm';
+import { escapeLike } from '../lib/escape-like.js';
 import {
   decodeCursor,
   buildCursorWhere,
@@ -25,6 +26,9 @@ import {
   wrapPaginatedResponse,
   parsePagination,
 } from '../lib/cursor-pagination.js';
+import pino from 'pino';
+
+const log = pino({ name: 'activity-feed' });
 
 const router = new Hono();
 
@@ -49,7 +53,7 @@ router.get('/', requireOrg, async (c) => {
   const fetchLimit = limit + 1;
 
   const conditions: ReturnType<typeof and>[] = [eq(activityFeed.orgId, orgId)];
-  if (action) conditions.push(sql`${activityFeed.action} LIKE ${`%${action}%`}`);
+  if (action) conditions.push(ilike(activityFeed.action, `%${escapeLike(action)}%`));
   if (resourceType) conditions.push(eq(activityFeed.resourceType, resourceType));
   if (actorType) conditions.push(eq(activityFeed.actorType, actorType));
 
@@ -104,6 +108,6 @@ export async function writeFeedEntry(
     });
   } catch (err) {
     // Feed writes are best-effort — losing a feed entry is acceptable (Spec 18)
-    console.error('[activity-feed] Failed to write entry:', err);
+    log.error({ err }, 'Failed to write entry');
   }
 }

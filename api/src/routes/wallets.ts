@@ -16,6 +16,10 @@ import { handleWalletDisconnected } from '../lib/edge-cases.js';
 import { validateTransition } from '../lib/state-machine.js';
 import { emit, EventNames, createEvent } from '../lib/event-bus.js';
 import { createDelegation, revokeDelegation } from '../lib/delegation.js';
+import pino from 'pino';
+
+const log = pino({ name: 'wallet-routes' });
+
 import {
   decodeCursor,
   buildCursorWhere,
@@ -202,7 +206,7 @@ router.post('/:id/revoke-delegation', requireOrg, requireCapability(Capability.M
   // Transition protected blobs to tracked, stop auto-renewal, fire alert.
   // In-flight renewals are NOT aborted (only blobs in 'protected' state are affected).
   await handleWalletDisconnected(id).catch((err) => {
-    console.error('Failed to handle wallet disconnect compensating actions:', err);
+    log.error({ err }, 'Failed to handle wallet disconnect compensating actions');
   });
 
   return c.json({ message: 'Delegation revoked. Monitoring continues but auto-renewal stopped.' });

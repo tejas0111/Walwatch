@@ -83,6 +83,25 @@ app.use('*', idempotencyMiddleware);
 app.use('/api/auth/*', bodyLimit({ maxSize: 10 * 1024 }));
 app.use('*', bodyLimit({ maxSize: 1024 * 1024 }));
 
+// Global request timeout (30s for most endpoints, 60s for long-running operations)
+app.use('*', createMiddleware(async (c, next) => {
+  const timeoutMs = c.req.path.startsWith('/api/admin') ? 60_000 : 30_000;
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`Request timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([
+      next(),
+      timeoutPromise,
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle!);
+  }
+}));
+
 // Security headers
 app.use('*', createMiddleware(async (c, next) => {
   await next();
@@ -101,7 +120,8 @@ app.use('*', createMiddleware(async (c, next) => {
 }));
 
 // ── Health check (before auth middleware) ──────────────────────────
-app.get('/health', async (c) => {
+// Rate-limited separately since it sits outside the /api/* middleware scope
+app.get('/health', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (c) => {
   const checks: Record<string, string> = {};
 
   // DB check

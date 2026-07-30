@@ -4,6 +4,9 @@ import crypto from 'node:crypto';
 import { getDb } from '../db/index.js';
 import { eq, and, gt, lt } from 'drizzle-orm';
 import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
+import pino from 'pino';
+
+const log = pino({ name: 'idempotency' });
 
 const idempotencyCache = pgTable('idempotency_cache', {
   idempotencyKey: text('idempotency_key').primaryKey(),
@@ -27,8 +30,8 @@ setInterval(async () => {
     const cutoff = new Date(Date.now() - TTL_MS);
     await db.delete(idempotencyCache)
       .where(lt(idempotencyCache.createdAt, cutoff));
-  } catch {
-    // best-effort
+  } catch (err) {
+    log.error({ err }, 'Idempotency cache cleanup failed');
   }
 }, 60 * 60 * 1000);
 
@@ -72,6 +75,8 @@ export async function idempotencyMiddleware(c: Context, next: Next) {
       idempotencyKey: cacheKey,
       responseStatus: statusCode,
       responseBody: JSON.stringify(responseBody),
-    }).catch(() => {});
+    }).catch((err) => {
+      log.error({ err }, 'Failed to cache idempotency response');
+    });
   }
 }

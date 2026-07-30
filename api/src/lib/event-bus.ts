@@ -19,8 +19,14 @@ import { getDb } from '../db/index.js';
 import { alertEvents, webhooks, notifications as notificationsTable, activityFeed, eventLog } from '../db/schema.js';
 import { eq, and, sql } from 'drizzle-orm';
 import { URL } from 'url';
-import { lookup } from 'dns/promises';
+import { resolve4 } from 'dns/promises';
 import { isIP } from 'net';
+import pino from 'pino';
+
+const log = pino({ name: 'event-bus' });
+
+// Cached TextEncoder instance — reused across all webhook deliveries
+const textEncoder = new TextEncoder();
 
 // ── Event Name Constants (spec 26) ────────────────────────────
 
@@ -188,7 +194,7 @@ export async function emit(event: BaseEventPayload): Promise<void> {
       traceId: event.traceId ?? (event.details?.traceId as string | undefined),
     });
   } catch (err) {
-    console.error('Failed to persist event to event_log:', err);
+    log.error({ err }, 'Failed to persist event to event_log');
   }
 
   // 2. Dispatch to subscribers
@@ -201,7 +207,7 @@ export async function emit(event: BaseEventPayload): Promise<void> {
           promises.push(result);
         }
       } catch (err) {
-        console.error(`[event-bus] Subscriber ${sub.id} failed for ${event.eventName}:`, err);
+        log.error({ err, subscriberId: sub.id, eventName: event.eventName }, 'Subscriber failed');
       }
     }
   }
@@ -240,12 +246,32 @@ function isPrivateIP(ip: string): boolean {
   return PRIVATE_IP_RANGES.some((r) => r.test(ip));
 }
 
+// Tracked set of previously-verified hostnames to avoid redundant DNS lookups.
+// Cached for 5 minutes — long enough to be useful, short enough to catch DNS changes.
+const dnsCache = new Map<string, { isInternal: boolean; expiresAt: number }>();
+const DNS_CACHE_TTL_MS = 5 * 60 * 1000;
+
 async function isInternalHostname(hostname: string): Promise<boolean> {
-  if (isIP(hostname)) return isPrivateIP(hostname);
+  // Check cache first
+  const cached = dnsCache.get(hostname);
+  if (cached && Date.now() < cached.expiresAt) return cached.isInternal;
+
+  if (isIP(hostname)) {
+    const result = isPrivateIP(hostname);
+    dnsCache.set(hostname, { isInternal: result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+    return result;
+  }
+
   try {
-    const addresses = await lookup(hostname);
-    return isPrivateIP(addresses.address);
+    // Resolve ALL A/AAAA records and check each one (prevents DNS rebinding: if ANY
+    // resolved IP is internal, treat the hostname as internal regardless of which
+    // IP a rebinding attack might point to.)
+    const addresses = await resolve4(hostname);
+    const isInternal = addresses.some(addr => isPrivateIP(addr));
+    dnsCache.set(hostname, { isInternal, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+    return isInternal;
   } catch {
+    dnsCache.set(hostname, { isInternal: false, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
     return false;
   }
 }
@@ -278,11 +304,11 @@ export async function dispatchToWebhooks(event: BaseEventPayload): Promise<void>
     for (const wh of activeWebhooks) {
       // Fire-and-forget webhook delivery with a timeout
       deliverWebhook(wh, event).catch((err) => {
-        console.error(`[event-bus] Webhook ${wh.id} delivery failed:`, err);
+        log.error({ err, webhookId: wh.id }, 'Webhook delivery failed');
       });
     }
   } catch (err) {
-    console.error('[event-bus] Webhook dispatch error:', err);
+    log.error({ err }, 'Webhook dispatch error');
   }
 }
 
@@ -294,17 +320,17 @@ async function deliverWebhook(
   try {
     parsed = new URL(wh.url);
   } catch {
-    console.error(`[event-bus] Webhook ${wh.id} has invalid URL: ${wh.url}`);
+    log.error({ webhookId: wh.id, url: wh.url }, 'Webhook has invalid URL');
     return;
   }
 
   if (parsed.protocol !== 'https:') {
-    console.error(`[event-bus] Webhook ${wh.id} must use HTTPS protocol`);
+    log.error({ webhookId: wh.id, protocol: parsed.protocol }, 'Webhook must use HTTPS protocol');
     return;
   }
 
   if (await isInternalHostname(parsed.hostname)) {
-    console.error(`[event-bus] Webhook ${wh.id} URL must point to an external service`);
+    log.error({ webhookId: wh.id, hostname: parsed.hostname }, 'Webhook URL must point to an external service');
     return;
   }
 
@@ -325,16 +351,16 @@ async function deliverWebhook(
   };
 
   // HMAC signing for webhook payload verification
+  // Uses shared TextEncoder instance to reduce GC pressure
   if (wh.secret) {
-    const encoder = new TextEncoder();
     const key = await crypto.subtle.importKey(
       'raw',
-      encoder.encode(wh.secret),
+      textEncoder.encode(wh.secret),
       { name: 'HMAC', hash: 'SHA-256' },
       false,
       ['sign'],
     );
-    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+    const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(payload));
     const sigHex = Array.from(new Uint8Array(signature))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
@@ -351,7 +377,7 @@ async function deliverWebhook(
     });
 
     if (!response.ok) {
-      console.warn(`[event-bus] Webhook ${wh.id} returned ${response.status}`);
+      log.warn({ webhookId: wh.id, status: response.status }, 'Webhook returned non-200 status');
       // Track failure count (update the webhook record)
       try {
         const db = getDb();
@@ -374,7 +400,7 @@ async function deliverWebhook(
       } catch { /* best effort */ }
     }
   } catch (err) {
-    console.error(`[event-bus] Webhook ${wh.id} error:`, err);
+    log.error({ err, webhookId: wh.id }, 'Webhook delivery error');
   }
 }
 
@@ -417,7 +443,7 @@ export async function persistAlertEvent(event: BaseEventPayload): Promise<void> 
       firedAt: new Date(event.timestamp),
     });
   } catch (err) {
-    console.error('[event-bus] Failed to persist alert event:', err);
+    log.error({ err }, 'Failed to persist alert event');
   }
 }
 
@@ -452,7 +478,7 @@ export async function persistActivityFeed(event: BaseEventPayload): Promise<void
       traceId: event.traceId ?? (event.details?.traceId as string | undefined) ?? null,
     });
   } catch (err) {
-    console.warn('[event-bus] Activity feed write failed (best-effort):', err);
+    log.warn({ err }, 'Activity feed write failed (best-effort)');
   }
 }
 
@@ -504,7 +530,7 @@ export function initEventBus(): void {
   // Subscribe to ALL events for activity feed (Spec 18 — Three Distinct Surfaces)
   subscribe('*' as EventName, persistActivityFeed, 'Persist events to activity_feed table');
 
-  console.log('[event-bus] Initialized with webhook dispatch + persistence + activity feed subscribers');
+  log.info('Initialized with webhook dispatch + persistence + activity feed subscribers');
 }
 
 // ── Convenience Emitters ───────────────────────────────────────
@@ -546,7 +572,7 @@ export function emitBlobEvent(
 ): BaseEventPayload {
   const eventName = `blob.${state}` as EventName;
   const event = createEvent(eventName, orgId, 'blob_registration', blobId, actor, details, traceId);
-  emit(event).catch((err) => console.error('[event-bus] emitBlobEvent failed:', err));
+  emit(event).catch((err) => log.error({ err }, 'emitBlobEvent failed'));
   return event;
 }
 
@@ -563,7 +589,7 @@ export function emitRenewalEvent(
 ): BaseEventPayload {
   const eventName = `renewal.${subState}` as EventName;
   const event = createEvent(eventName, orgId, 'renewal_job', renewalJobId, actor, details, traceId);
-  emit(event).catch((err) => console.error('[event-bus] emitRenewalEvent failed:', err));
+  emit(event).catch((err) => log.error({ err }, 'emitRenewalEvent failed'));
   return event;
 }
 

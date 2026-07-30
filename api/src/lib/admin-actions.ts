@@ -17,6 +17,9 @@ import { invariantChecker } from './invariant-check.js';
 import { costEngine } from './cost-engine.js';
 import { logAuditSystem } from '../middleware/audit.js';
 import { createEvent, EventNames, emit } from './event-bus.js';
+import pino from 'pino';
+
+const logger = pino({ name: 'admin-actions' });
 
 export interface AdminOperator {
   adminId: string;
@@ -140,7 +143,7 @@ export async function adminRetryRenewalJob(
       { supersededJobId: job.id, originalLimitId: job.blockedByLimitId, triggeredBy: 'admin' },
     );
     await emit(overrideEvent).catch((err) => {
-      console.error('Failed to emit override event:', err);
+      logger.error({ err }, 'Failed to emit override event');
     });
   }
 

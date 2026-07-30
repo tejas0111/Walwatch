@@ -20,6 +20,9 @@
 
 import crypto from 'node:crypto';
 import { config } from '../config.js';
+import pino from 'pino';
+
+const log = pino({ name: 'encryption' });
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
@@ -33,8 +36,8 @@ function deriveKey(version: number): Buffer {
   const rawKey = config.secretsEncryptionKey;
   if (!rawKey) {
     if (config.nodeEnv !== 'production') {
-      console.warn(
-        '[encryption] SECRETS_ENCRYPTION_KEY not set — using derived dev-only key. ' +
+      log.warn(
+        'SECRETS_ENCRYPTION_KEY not set — using derived dev-only key. ' +
           'Set SECRETS_ENCRYPTION_KEY in production.',
       );
       return Buffer.from(crypto.hkdfSync('sha256', Buffer.from('dev-only-key-do-not-use-in-production'), `v${version}`, '', 32));

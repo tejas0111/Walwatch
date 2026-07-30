@@ -3,6 +3,9 @@ import { eq, and, sql } from 'drizzle-orm';
 import { blobRegistrations, auditLogs } from '../db/schema.js';
 import { validateTransition } from './state-machine.js';
 import { emit, EventNames, createEvent } from './event-bus.js';
+import pino from 'pino';
+
+const logger = pino({ name: 'edge-cases' });
 
 export function snapshotPolicyOnStart(policy: any): Record<string, unknown> {
   return {
@@ -54,7 +57,7 @@ export async function handleWalletDisconnected(walletId: string): Promise<void> 
       details: { previousStatus, newStatus: 'tracked', reason: 'wallet_disconnected', walletId },
     }).catch((err) => {
       // Best-effort: audit logging failure must not break the compensating action
-      console.error('Failed to audit compensating action:', err);
+      logger.error({ err }, 'Failed to audit compensating action');
     });
 
     await emit(createEvent(

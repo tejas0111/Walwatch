@@ -1,12 +1,12 @@
 import { Transaction, type TransactionArgument } from '@mysten/sui/transactions';
-import { SuiJsonRpcClient, SuiObjectResponse } from '@mysten/sui/jsonRpc';
+import { SuiObjectResponse } from '@mysten/sui/jsonRpc';
 import { getZkLoginSignature } from '@mysten/sui/zklogin';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import pino from 'pino';
 import { withRetry } from '../lib/retry.js';
 import { SuiClientPool, createPoolFromEnv } from '../lib/sui-pool.js';
 import { config } from '../config.js';
-import { selectGasCoin } from './gas-wallet-service.js';
+import { selectGasCoin, getPrimaryGasWalletKeypair } from './gas-wallet-service.js';
 import { getDb } from '../db/index.js';
 import { users, subscriptions } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -40,23 +40,10 @@ const WAL_COIN_TYPE = config.walCoinType;
 
 const FEE_CONFIG_OBJECT_ID = process.env.FEE_CONFIG_OBJECT_ID || '';
 
-// Load gas wallet key into module-level variable, then scrub from env
-// to prevent accidental leaks to child processes or crash dumps.
-const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY || '';
-delete process.env.GAS_WALLET_PRIMARY_KEY;
-
-// Shared Redis client singleton — prevents connection leaks from per-call clients.
-let redisClient: ReturnType<typeof import('redis').createClient> | null = null;
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-
-async function getRedis(): Promise<ReturnType<typeof import('redis').createClient>> {
-  if (redisClient?.isOpen) return redisClient;
-  const { default: redis } = await import('redis');
-  redisClient = redis.createClient({ url: REDIS_URL });
-  redisClient.on('error', (err: Error) => logger.error({ err }, 'Redis client error'));
-  await redisClient.connect();
-  return redisClient;
-}
+// Gas wallet key bytes are loaded by gas-wallet-service.ts, which scrubs
+// process.env after reading. Import getGasWalletPrimaryKeyBytes() to
+// avoid the double-delete ordering issue (both modules previously deleted).
+import { getRedisClient } from '../lib/redis-client.js';
 
 interface CreateVaultRequest {
   wallet_address: string;
@@ -135,23 +122,26 @@ const COMPARE_AND_DELETE_SCRIPT = `
 async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
   try {
     const token = crypto.randomUUID();
-    const r = await getRedis();
-    const acquired = await r.setNX(key, token);
-    if (acquired === 1) {
-      await r.pExpire(key, ttlMs);
+    const r = await getRedisClient();
+    // ioredis: SET key value NX PX ttlMs
+    const acquired = await r.set(key, token, 'PX', ttlMs, 'NX');
+    if (acquired === 'OK') {
       return token;
     }
     return null;
-  } catch {
+  } catch (err) {
+    logger.warn({ err, key }, 'Failed to acquire Redis lock');
     return null;
   }
 }
 
 async function releaseLock(key: string, token: string): Promise<void> {
   try {
-    const r = await getRedis();
-    await r.eval(COMPARE_AND_DELETE_SCRIPT, { keys: [key], arguments: [token] });
-  } catch {
+    const r = await getRedisClient();
+    // ioredis eval: EVAL script numkeys key1 key2 arg1 arg2
+    await r.eval(COMPARE_AND_DELETE_SCRIPT, 1, key, token);
+  } catch (err) {
+    logger.warn({ err, key }, 'Failed to release Redis lock');
   }
 }
 
@@ -206,8 +196,7 @@ async function buildAndReturnTxBytes(
   tx.setSender(zkloginAddress);
   tx.setGasBudget(gasBudget);
 
-  const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
-  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasWalletKp = getPrimaryGasWalletKeypair();
   const gasWalletAddress = gasWalletKp.toSuiAddress();
 
   return withAddressLock(gasWalletAddress, async () => {
@@ -236,13 +225,10 @@ async function submitUserSignedTx(
     userSignature,
   });
 
-  const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
-  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasWalletKp = getPrimaryGasWalletKeypair();
   const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
 
   return pool.call(async (client) => {
-    // Note: SuiJsonRpcClient uses executeTransactionBlock in the installed v2 SDK.
-    // The deprecated method name still works; the key v2 upgrade (Transaction class) is already in use.
     const result = await client.executeTransactionBlock({
       transactionBlock: bytes,
       signature: [zkLoginSig, gasSig],
@@ -256,26 +242,17 @@ async function submitUserSignedTx(
 }
 
 async function getSpendTotal(orgId: string, windowMs: number): Promise<number> {
-  try {
-    const r = await getRedis();
-    const key = `spend:${orgId}:total:${windowMs}`;
-    const val = await r.get(key);
-    return val ? Number(val) : 0;
-  } catch (err) {
-    logger.warn({ err }, 'Spend cap check failed — allowing through (fallback mode)');
-    return 0;
-  }
+  const r = await getRedisClient();
+  const key = `spend:${orgId}:total:${windowMs}`;
+  const val = await r.get(key);
+  return val ? Number(val) : 0;
 }
 
 async function recordSpend(orgId: string, amount: number): Promise<void> {
-  try {
-    const r = await getRedis();
-    const dayKey = `spend:${orgId}:total:${86400000}`;
-    await r.incrBy(dayKey, amount);
-    await r.expire(dayKey, 86401);
-  } catch (err) {
-    logger.warn({ err }, 'Spend recording failed — continuing (fallback mode)');
-  }
+  const r = await getRedisClient();
+  const dayKey = `spend:${orgId}:total:${86400000}`;
+  await r.incrby(dayKey, amount);
+  await r.expire(dayKey, 86401);
 }
 
 async function getPlanLimits(orgId: string): Promise<{ maxPerTx: number; maxPerDay: number }> {
@@ -348,7 +325,7 @@ export class VaultService {
         ],
       });
 
-      const { txBytes, sender } = await buildAndReturnTxBytes(tx, userId, 10_000_000);
+      const { txBytes, sender } = await buildAndReturnTxBytes(tx, userId, config.gasBudgetCreateVault);
       return { txBytes, sender, vaultId: '' };
     });
   }
@@ -373,7 +350,7 @@ export class VaultService {
         ],
       });
 
-      return buildAndReturnTxBytes(tx, userId, 5_000_000);
+      return buildAndReturnTxBytes(tx, userId, config.gasBudgetDefault);
     });
   }
 
@@ -396,7 +373,7 @@ export class VaultService {
         ],
       });
 
-      return buildAndReturnTxBytes(tx, userId, 5_000_000);
+      return buildAndReturnTxBytes(tx, userId, config.gasBudgetDefault);
     });
   }
 
@@ -421,7 +398,7 @@ export class VaultService {
         ],
       });
 
-      return buildAndReturnTxBytes(tx, userId, 5_000_000);
+      return buildAndReturnTxBytes(tx, userId, config.gasBudgetDefault);
     });
   }
 
@@ -440,7 +417,7 @@ export class VaultService {
         ],
       });
 
-      return buildAndReturnTxBytes(tx, userId, 5_000_000);
+      return buildAndReturnTxBytes(tx, userId, config.gasBudgetDefault);
     });
   }
 

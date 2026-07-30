@@ -34,7 +34,9 @@ const updateProjectSchema = createProjectSchema.partial();
 
 async function requireProjectOrg(c: Context, next: Next) {
   const userId = c.get('userId');
-  const orgId = c.req.header('X-Org-Id');
+  // Prefer orgId already set by upstream requireOrg middleware (from JWT or verified session).
+  // Fall back to X-Org-Id header for routes that don't have requireOrg applied upstream.
+  const orgId = c.get('orgId') || c.req.header('X-Org-Id');
   if (!orgId) {
     return c.json({ error: { message: 'Organization ID is required', code: ErrorCodes.VALIDATION_ERROR } }, 400);
   }

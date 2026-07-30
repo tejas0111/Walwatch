@@ -3,6 +3,6 @@
   "out": "./src/db/migrations",
   "dialect": "postgresql",
   "dbCredentials": {
-    "url": "postgres://walwatch:walwatch_dev@localhost:5433/walwatch"
+    "url": "postgres://walwatch:walwatch_dev@localhost:5432/walwatch"
   }
 }

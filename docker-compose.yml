@@ -58,7 +58,9 @@ services:
       - walwatch
 
   keeper:
-    build: ./keeper
+    build:
+      context: .
+      dockerfile: keeper/Dockerfile
     environment:
       DATABASE_URL: postgres://walwatch:walwatch_dev@postgres:5432/walwatch
       KEEPER_PRIVATE_KEY: ${KEEPER_PRIVATE_KEY:-}
