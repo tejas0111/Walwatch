@@ -262,7 +262,7 @@ router.post('/google',
           userId: user.id,
         },
         config.jwtSecret,
-        { expiresIn: '7d', issuer: 'walwatch', audience: 'walwatch-api', algorithm: 'HS256' },
+        { expiresIn: '7d', issuer: 'walwatch', audience: 'walwatch-api', algorithm: 'HS256', ...(config.jwtKeyId ? { keyid: config.jwtKeyId } : {}) },
       );
 
       await logAudit(c, 'auth.oauth_login', 'user', user.id, { provider: 'google', email });
@@ -409,7 +409,7 @@ router.post('/github',
           userId: user.id,
         },
         config.jwtSecret,
-        { expiresIn: '7d', issuer: 'walwatch', audience: 'walwatch-api', algorithm: 'HS256' },
+        { expiresIn: '7d', issuer: 'walwatch', audience: 'walwatch-api', algorithm: 'HS256', ...(config.jwtKeyId ? { keyid: config.jwtKeyId } : {}) },
       );
 
       await logAudit(c, 'auth.oauth_login', 'user', user.id, { provider: 'github', email });

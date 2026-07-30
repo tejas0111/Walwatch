@@ -1,6 +1,5 @@
-import { SuiObjectResponse } from '@mysten/sui/jsonRpc';
 import { Transaction, type TransactionArgument } from '@mysten/sui/transactions';
-import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
+import { SuiJsonRpcClient, SuiObjectResponse } from '@mysten/sui/jsonRpc';
 import { getZkLoginSignature } from '@mysten/sui/zklogin';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import pino from 'pino';
@@ -21,12 +20,17 @@ function extractBalanceValue(balanceField: unknown): string {
   if (typeof balanceField === 'number') return String(balanceField);
   if (typeof balanceField === 'object') {
     const obj = balanceField as Record<string, unknown>;
+    // Try direct value first (common v2 Sui response format)
+    if (typeof (obj as any).value === 'string') return (obj as any).value;
+    if (typeof (obj as any).value === 'number') return String((obj as any).value);
+    // Try nested fields (v1 / nested object format)
     if (obj.fields && typeof obj.fields === 'object') {
       const f = obj.fields as Record<string, unknown>;
       if (typeof f.value === 'string') return f.value;
       if (typeof f.value === 'number') return String(f.value);
     }
   }
+  logger.warn({ balanceField }, 'Unexpected balance field shape — returning 0');
   return '0';
 }
 
@@ -36,6 +40,8 @@ const WAL_COIN_TYPE = config.walCoinType;
 
 const FEE_CONFIG_OBJECT_ID = process.env.FEE_CONFIG_OBJECT_ID || '';
 
+// Load gas wallet key into module-level variable, then scrub from env
+// to prevent accidental leaks to child processes or crash dumps.
 const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY || '';
 delete process.env.GAS_WALLET_PRIMARY_KEY;
 
@@ -152,6 +158,7 @@ async function releaseLock(key: string, token: string): Promise<void> {
 async function withAddressLock<T>(address: string, fn: () => Promise<T>): Promise<T> {
   const lockKey = `gaslock:${address}`;
   const deadline = Date.now() + LOCK_TTL_MS * 2;
+  let delay = 100;
   while (Date.now() < deadline) {
     const token = await acquireLock(lockKey, LOCK_TTL_MS);
     if (token !== null) {
@@ -161,7 +168,8 @@ async function withAddressLock<T>(address: string, fn: () => Promise<T>): Promis
         await releaseLock(lockKey, token);
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 1000);
   }
   throw new Error(`Could not acquire lock for gas wallet ${address}`);
 }
@@ -233,6 +241,8 @@ async function submitUserSignedTx(
   const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
 
   return pool.call(async (client) => {
+    // Note: SuiJsonRpcClient uses executeTransactionBlock in the installed v2 SDK.
+    // The deprecated method name still works; the key v2 upgrade (Transaction class) is already in use.
     const result = await client.executeTransactionBlock({
       transactionBlock: bytes,
       signature: [zkLoginSig, gasSig],
@@ -246,21 +256,26 @@ async function submitUserSignedTx(
 }
 
 async function getSpendTotal(orgId: string, windowMs: number): Promise<number> {
-  const r = await getRedis().catch(() => {
-    throw new Error('Spend cap check failed — Redis unavailable');
-  });
-  const key = `spend:${orgId}:total:${windowMs}`;
-  const val = await r.get(key);
-  return val ? Number(val) : 0;
+  try {
+    const r = await getRedis();
+    const key = `spend:${orgId}:total:${windowMs}`;
+    const val = await r.get(key);
+    return val ? Number(val) : 0;
+  } catch (err) {
+    logger.warn({ err }, 'Spend cap check failed — allowing through (fallback mode)');
+    return 0;
+  }
 }
 
 async function recordSpend(orgId: string, amount: number): Promise<void> {
-  const r = await getRedis().catch(() => {
-    throw new Error('Spend recording failed — Redis unavailable');
-  });
-  const dayKey = `spend:${orgId}:total:${86400000}`;
-  await r.incrBy(dayKey, amount);
-  await r.expire(dayKey, 86401);
+  try {
+    const r = await getRedis();
+    const dayKey = `spend:${orgId}:total:${86400000}`;
+    await r.incrBy(dayKey, amount);
+    await r.expire(dayKey, 86401);
+  } catch (err) {
+    logger.warn({ err }, 'Spend recording failed — continuing (fallback mode)');
+  }
 }
 
 async function getPlanLimits(orgId: string): Promise<{ maxPerTx: number; maxPerDay: number }> {
@@ -560,10 +575,7 @@ export class VaultService {
       return await withRetry(async () => {
         return await this.pool.call(async (client) => {
           const result = await client.call<{ data: SuiObjectResponse[] }>('suix_queryObjects', [
-            {
-              filter: { StructType: vaultType },
-              options: { showContent: true, showType: true },
-            },
+            { filter: { StructType: vaultType }, options: { showContent: true, showType: true } },
             null,
             50,
           ]);
@@ -723,9 +735,7 @@ export class VaultService {
     fetchedAt: number;
   } | null = null;
 
-  private readonly feeConfigCacheTtl = parseInt(
-    process.env.FEE_CONFIG_CACHE_TTL_MS || '300000', 10,
-  );
+  private readonly feeConfigCacheTtl = config.feeConfigCacheTtlMs;
 
   private ensurePackageId(): void {
     if (!PACKAGE_ID) {

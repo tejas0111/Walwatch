@@ -42,6 +42,7 @@ export async function register(input: RegisterInput): Promise<AuthResult> {
     expiresIn: config.jwtExpiresIn as StringValue,
     issuer: 'walwatch',
     audience: 'walwatch-api',
+    ...(config.jwtKeyId ? { keyid: config.jwtKeyId } : {}),
   });
   return { user: { id: user.id, email: user.email, name: user.name }, token };
 }
@@ -63,6 +64,7 @@ export async function login(input: LoginInput): Promise<AuthResult> {
     expiresIn: config.jwtExpiresIn as StringValue,
     issuer: 'walwatch',
     audience: 'walwatch-api',
+    ...(config.jwtKeyId ? { keyid: config.jwtKeyId } : {}),
   });
   return { user: { id: user.id, email: user.email, name: user.name }, token };
 }
