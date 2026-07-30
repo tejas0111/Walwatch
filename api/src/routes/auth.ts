@@ -283,6 +283,131 @@ router.post('/google',
   },
 );
 
+/**
+ * NOTE: GitHub OAuth (plain OAuth 2.0) does not support OIDC nonce claims.
+ * zkLogin requires a JWT id_token with a nonce claim bound to the ephemeral
+ * keypair — GitHub's access_token flow cannot provide this. Therefore GitHub
+ * is implemented as a standard OAuth login only, without zkLogin key derivation.
+ * If MystenLabs adds GitHub as a supported zkLogin issuer in the future,
+ * this flow will need to be updated to use the nonce-binding pattern from
+ * POST /auth/zklogin/prepare + POST /auth/google.
+ */
+
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
+const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || 'http://localhost:3000/login';
+
+const githubAuthSchema = z.object({
+  code: z.string().min(1),
+});
+
+router.get('/github/url', (c) => {
+  if (!GITHUB_CLIENT_ID) {
+    return c.json({ error: { message: 'GitHub OAuth not configured', code: 'OAUTH_NOT_CONFIGURED' } }, 500);
+  }
+  const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(GITHUB_REDIRECT_URI)}&scope=read:user+user:email`;
+  return c.json({ url });
+});
+
+router.post('/github',
+  rateLimit({ windowMs: 60 * 1000, max: 10 }),
+  zValidator('json', githubAuthSchema),
+  async (c) => {
+    try {
+      const { code } = c.req.valid('json');
+
+      if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+        return c.json({ error: { message: 'GitHub OAuth not configured', code: 'OAUTH_NOT_CONFIGURED' } }, 500);
+      }
+
+      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code,
+          redirect_uri: GITHUB_REDIRECT_URI,
+        }),
+      });
+      const tokenData = await tokenRes.json() as { access_token?: string; error_description?: string };
+      if (!tokenData.access_token) {
+        return c.json({ error: { message: tokenData.error_description || 'Failed to exchange GitHub code', code: 'GITHUB_TOKEN_ERROR' } }, 400);
+      }
+
+      const userRes = await fetch('https://api.github.com/user', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/json' },
+      });
+      const githubUser = await userRes.json() as { id: number; login: string; email?: string; name?: string };
+      if (!githubUser || !githubUser.id) {
+        return c.json({ error: { message: 'Failed to fetch GitHub user', code: 'GITHUB_USER_ERROR' } }, 400);
+      }
+
+      const emailsRes = await fetch('https://api.github.com/user/emails', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/json' },
+      });
+      const emails = await emailsRes.json() as Array<{ email: string; primary: boolean; verified: boolean }>;
+      const primaryEmail = githubUser.email || emails.find((e) => e.primary)?.email || `${githubUser.login}@github.com`;
+
+      const subject = String(githubUser.id);
+      const email = primaryEmail;
+      const name = githubUser.name || githubUser.login;
+
+      const db = getDb();
+
+      let [user] = await db.select().from(users).where(
+        and(eq(users.oauthProvider, 'github'), eq(users.oauthSubject, subject)),
+      ).limit(1);
+
+      if (!user) {
+        const [newUser] = await db.insert(users).values({
+          email,
+          passwordHash: '',
+          name: name || email,
+          oauthProvider: 'github',
+          oauthSubject: subject,
+          oauthEmail: email,
+          zkloginAddress: null,
+          ephemeralKeyEncrypted: null,
+          ephemeralKeyExpiry: null,
+          zkloginProofEncrypted: null,
+          zkloginJwtRandomness: null,
+          zkloginMaxEpoch: null,
+          lastKeyExportAt: null,
+        }).returning();
+
+        user = newUser;
+      }
+
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          auth_time: Math.floor(Date.now() / 1000),
+          provider: 'github',
+          userId: user.id,
+        },
+        config.jwtSecret,
+        { expiresIn: '7d', issuer: 'walwatch', audience: 'walwatch-api', algorithm: 'HS256' },
+      );
+
+      await logAudit(c, 'auth.oauth_login', 'user', user.id, { provider: 'github', email });
+
+      return c.json({
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          zkloginAddress: user.zkloginAddress,
+        },
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      return c.json({ error: { message: 'GitHub authentication failed', code: 'OAUTH_ERROR' } }, 401);
+    }
+  },
+);
+
 router.get('/me', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');

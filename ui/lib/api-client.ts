@@ -206,6 +206,14 @@ export class ApiClient {
     return this.request('/auth/google', { method: 'POST', body: JSON.stringify({ idToken, nonce, ephemeralPublicKey }) })
   }
 
+  getGithubUrl(): Promise<{ url: string }> {
+    return this.request('/auth/github/url')
+  }
+
+  loginWithGitHub(code: string): Promise<{ user: User; token: string }> {
+    return this.request('/auth/github', { method: 'POST', body: JSON.stringify({ code }) })
+  }
+
   logout(): Promise<void> {
     return this.request('/auth/logout', { method: 'POST' })
   }

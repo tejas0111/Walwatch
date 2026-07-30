@@ -10,6 +10,7 @@ interface AuthContextType {
   loading: boolean
   login: (email: string, password: string) => Promise<void>
   loginWithGoogle: (idToken: string, nonce: string, ephemeralPublicKey: string) => Promise<void>
+  loginWithGitHub: () => Promise<void>
   register: (email: string, password: string) => Promise<void>
   logout: () => void
   createOrg: (name: string, slug: string) => Promise<Organization>
@@ -101,6 +102,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await refreshOrgs()
   }, [refreshUser, refreshOrgs])
 
+  const loginWithGitHub = useCallback(async () => {
+    const { url } = await api.getGithubUrl()
+    const width = 600, height = 700
+    const left = window.screenX + (window.innerWidth - width) / 2
+    const top = window.screenY + (window.innerHeight - height) / 2
+    const popup = window.open(url, 'github-oauth', `width=${width},height=${height},left=${left},top=${top}`)
+    if (!popup) throw new Error('Popup blocked')
+
+    const code = await new Promise<string>((resolve, reject) => {
+      const timer = setInterval(() => {
+        try {
+          if (popup.closed) {
+            clearInterval(timer)
+            reject(new Error('GitHub sign-in cancelled'))
+            return
+          }
+          const params = new URLSearchParams(popup.location.search)
+          const c = params.get('code')
+          if (c) {
+            clearInterval(timer)
+            popup.close()
+            resolve(c)
+          }
+        } catch { }
+      }, 300)
+      setTimeout(() => { clearInterval(timer); reject(new Error('GitHub sign-in timed out')) }, 120000)
+    })
+    const { token } = await api.loginWithGitHub(code)
+    api.setToken(token)
+    localStorage.setItem('walwatch_token', token)
+    await refreshUser()
+    await refreshOrgs()
+  }, [refreshUser, refreshOrgs])
+
   const register = useCallback(async (email: string, password: string) => {
     const { token } = await api.register(email, password)
     api.setToken(token)
@@ -135,9 +170,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo(() => ({
     user, org, orgs, loading,
-    login, loginWithGoogle, register, logout, createOrg, switchOrg,
+    login, loginWithGoogle, loginWithGitHub, register, logout, createOrg, switchOrg,
     refreshOrgs, refreshUser,
-  }), [user, org, orgs, loading, login, loginWithGoogle, register, logout, createOrg, switchOrg, refreshOrgs, refreshUser])
+  }), [user, org, orgs, loading, login, loginWithGoogle, loginWithGitHub, register, logout, createOrg, switchOrg, refreshOrgs, refreshUser])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

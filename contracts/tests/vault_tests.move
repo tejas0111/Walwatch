@@ -3,7 +3,7 @@
 #[test_only]
 module auto_renewal::vault_tests {
 
-    use sui::test_scenario::{Self, ctx, next_tx, end};
+    use sui::test_scenario::{Self, ctx, next_tx, next_epoch, end};
     use sui::coin::{Self, Coin};
     use sui::tx_context::TxContext;
     use std::unit_test;
@@ -451,6 +451,7 @@ module auto_renewal::vault_tests {
     // Test 25: Withdraw delay enforced
     // ======================================================================
     #[test]
+    #[expected_failure(abort_code = 15, location = auto_renewal::vault)]
     fun test_withdraw_delay_enforced() {
         let mut s = init_env();
         next_tx(&mut s, U);
@@ -464,15 +465,53 @@ module auto_renewal::vault_tests {
         );
         unit_test::destroy(sys);
         put_config(&mut s, config);
-        // Initiate withdraw in same epoch 0
+        // Initiate withdraw in epoch 0
         next_tx(&mut s, U);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
         vault::initiate_withdraw(&mut v, 30_000_000, ctx(&mut s));
         test_scenario::return_shared(v);
-        // Try finalize in same epoch — should fail (delay = 2 epochs)
+        // Try finalize in same epoch — SHOULD ABORT (delay = 2 epochs)
         next_tx(&mut s, K);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
-        assert!(vault::get_wal_balance(&v) == 100_000_000, 140);
+        vault::finalize_withdraw(&mut v, ctx(&mut s));
+        test_scenario::return_shared(v);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 27: Withdraw finalization after delay elapses
+    // ======================================================================
+    #[test]
+    fun test_finalize_withdraw_after_delay() {
+        let mut s = init_env();
+        next_tx(&mut s, U);
+        let config = get_config(&mut s);
+        let mut sys = sys(ctx(&mut s));
+        vault::create_vault(
+            &config,
+            blob(&mut sys, 100, ctx(&mut s)),
+            wal(100_000_000, ctx(&mut s)),
+            5, 10, option::none(), U, 2, ctx(&mut s),
+        );
+        unit_test::destroy(sys);
+        put_config(&mut s, config);
+        // Initiate withdraw in epoch 0
+        next_tx(&mut s, U);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::initiate_withdraw(&mut v, 30_000_000, ctx(&mut s));
+        test_scenario::return_shared(v);
+        // Advance past the 2-epoch delay
+        next_epoch(&mut s);
+        next_epoch(&mut s);
+        // Now finalize should succeed — epoch 2 >= epoch 0 + 2
+        next_tx(&mut s, K);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::finalize_withdraw(&mut v, ctx(&mut s));
+        test_scenario::return_shared(v);
+        // Verify the vault balance decreased by 30_000_000
+        next_tx(&mut s, U);
+        let v = test_scenario::take_shared<RenewalVault>(&mut s);
+        assert!(vault::get_wal_balance(&v) == 70_000_000, 150);
         test_scenario::return_shared(v);
         end(s);
     }
