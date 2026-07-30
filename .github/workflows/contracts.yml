@@ -1,0 +1,17 @@
+name: Contracts
+permissions:
+  contents: read
+on:
+  push: { branches: [main], paths: ['contracts/**'] }
+  pull_request: { paths: ['contracts/**'] }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - uses: MystenLabs/sui-action@v1
+      - run: sui move build
+        working-directory: contracts
+      - run: sui move test
+        working-directory: contracts

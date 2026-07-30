@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.npm/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+contracts/build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temp files
+tmp/
+temp/
+.tmp/
+
+# Specs / docs source
+specs/
+agent.md
+
+# Development-only
+*.tsbuildinfo
+.next/
+.cache/
+.eslintcache
+
+# Git worktrees
+.worktrees/

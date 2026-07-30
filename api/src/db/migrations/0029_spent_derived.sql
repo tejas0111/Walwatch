@@ -1,0 +1,2 @@
+-- Migration 0029: budget.spent and spending_limits.spent are now derived from cost_records
+-- Columns kept for backward compatibility but no longer updated by application code
