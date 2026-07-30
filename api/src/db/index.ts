@@ -2,6 +2,9 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema.js';
 import { config } from '../config.js';
+import pino from 'pino';
+
+const log = pino({ name: 'db' });
 
 let client: ReturnType<typeof postgres> | null = null;
 let db: ReturnType<typeof drizzle> | null = null;
@@ -32,7 +35,9 @@ export async function closeDb() {
  */
 export function resetDb() {
   if (client) {
-    client.end().catch(() => {});
+    client.end().catch((err) => {
+      log.error({ err }, 'Failed to close DB connection during reset');
+    });
     client = null;
   }
   db = null;

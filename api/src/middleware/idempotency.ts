@@ -75,6 +75,8 @@ export async function idempotencyMiddleware(c: Context, next: Next) {
       idempotencyKey: cacheKey,
       responseStatus: statusCode,
       responseBody: JSON.stringify(responseBody),
-    }).catch(() => {});
+    }).catch((err) => {
+      log.error({ err }, 'Failed to cache idempotency response');
+    });
   }
 }

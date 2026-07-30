@@ -1,5 +1,5 @@
 import { Transaction, type TransactionArgument } from '@mysten/sui/transactions';
-import { SuiJsonRpcClient, SuiObjectResponse } from '@mysten/sui/jsonRpc';
+import { SuiObjectResponse } from '@mysten/sui/jsonRpc';
 import { getZkLoginSignature } from '@mysten/sui/zklogin';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import pino from 'pino';

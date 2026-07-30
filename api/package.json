@@ -14,8 +14,8 @@
   "dependencies": {
     "@hono/node-server": "^1.12.0",
     "@hono/zod-validator": "^0.2.0",
-    "@mysten/sui": "^2.22.1",
-    "@mysten/walrus": "^0.1.0",
+    "@mysten/sui": "^2.23.1",
+    "@mysten/walrus": "^1.2.12",
     "bcrypt": "^5.1.0",
     "dotenv": "^16.0.0",
     "drizzle-orm": "^0.38.0",
@@ -25,7 +25,6 @@
     "jsonwebtoken": "^9.0.0",
     "pino": "^8.0.0",
     "postgres": "^3.4.0",
-    "redis": "^6.1.0",
     "zod": "^3.0.0"
   },
   "devDependencies": {

@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { Context } from 'hono';
 import { requireAuth } from '../middleware/auth.js';
 import { requireOrg } from '../middleware/org-scope.js';
 import { getDb } from '../db/index.js';
@@ -10,7 +11,7 @@ const router = new Hono();
 
 router.use('*', requireAuth);
 
-async function overviewHandler(c: any) {
+async function overviewHandler(c: Context) {
   const orgId = c.get('orgId');
   const db = getDb();
 

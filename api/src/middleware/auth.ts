@@ -6,6 +6,9 @@ import { getDb } from '../db/index.js';
 import { apiKeys } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { ErrorCodes } from '../lib/errors.js';
+import pino from 'pino';
+
+const log = pino({ name: 'auth-middleware' });
 
 /**
  * Verify a JWT against the current and any old (rotation) secrets.
@@ -107,7 +110,9 @@ export async function requireAuthOrApiKey(c: Context, next: Next) {
       return c.json({ error: { message: 'API key expired', code: ErrorCodes.UNAUTHORIZED, failureClass: 'persistent', requestId: getRequestId(c) } }, 401);
     }
 
-    db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, key.id)).catch(() => {});
+    db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, key.id)).catch((err) => {
+      log.error({ err }, 'Failed to update API key lastUsedAt');
+    });
 
     c.set('userId', key.userId);
     c.set('orgId', key.orgId);
