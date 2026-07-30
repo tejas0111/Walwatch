@@ -103,13 +103,48 @@ export class ReAuthRequiredError extends Error {
   constructor() { super('Withdraw requires fresh OAuth re-authentication (session < 15 min)'); }
 }
 
-const addressLocks = new Map<string, Promise<unknown>>();
+const LOCK_TTL_MS = 30_000;
+
+async function acquireLock(key: string, ttlMs: number): Promise<boolean> {
+  try {
+    const { default: redis } = await import('redis');
+    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    await r.connect();
+    const acquired = await r.setNX(key, Date.now().toString());
+    if (acquired === 1) await r.pExpire(key, ttlMs);
+    await r.quit();
+    return acquired === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function releaseLock(key: string): Promise<void> {
+  try {
+    const { default: redis } = await import('redis');
+    const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    await r.connect();
+    await r.del(key);
+    await r.quit();
+  } catch {
+  }
+}
 
 async function withAddressLock<T>(address: string, fn: () => Promise<T>): Promise<T> {
-  const prev = addressLocks.get(address) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  addressLocks.set(address, next);
-  return next;
+  const lockKey = `gaslock:${address}`;
+  const deadline = Date.now() + LOCK_TTL_MS * 2;
+  while (Date.now() < deadline) {
+    const locked = await acquireLock(lockKey, LOCK_TTL_MS);
+    if (locked) {
+      try {
+        return await fn();
+      } finally {
+        await releaseLock(lockKey);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Could not acquire lock for gas wallet ${address}`);
 }
 
 async function loadUserZkLogin(userId: string): Promise<{
