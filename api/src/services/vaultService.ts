@@ -129,7 +129,8 @@ async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
       return token;
     }
     return null;
-  } catch {
+  } catch (err) {
+    logger.warn({ err, key }, 'Failed to acquire Redis lock');
     return null;
   }
 }
@@ -139,7 +140,8 @@ async function releaseLock(key: string, token: string): Promise<void> {
     const r = await getRedisClient();
     // ioredis eval: EVAL script numkeys key1 key2 arg1 arg2
     await r.eval(COMPARE_AND_DELETE_SCRIPT, 1, key, token);
-  } catch {
+  } catch (err) {
+    logger.warn({ err, key }, 'Failed to release Redis lock');
   }
 }
 

@@ -16,6 +16,7 @@
 //   - blob::blob_id        — returns the blob's u256 identifier
 //   - wal::wal::WAL        — the native WAL token type
 
+#[allow(duplicate_alias, unused_use, unused_field, unused_mut_parameter, unused_function)]
 module auto_renewal::vault {
 
     // ============================================================================
@@ -71,6 +72,17 @@ module auto_renewal::vault {
     /// Prevents beneficiary from locking funds for unreasonable durations.
     const MAX_WITHDRAW_DELAY_EPOCHS: u64 = 1000;
 
+    /// Maximum keeper fee in MIST-equivalent of WAL (100 WAL).
+    /// Prevents admin from setting a keeper fee that makes renewals uneconomical
+    /// or drains vault balances unreasonably. 100 WAL at 1 MIST/WAL floor.
+    const MAX_KEEPER_FEE: u64 = 100_000_000_000;
+
+    /// Maximum storage price per epoch in MIST-equivalent of WAL (~5,025 WAL).
+    /// Prevents admin from setting a storage price that overflows fee arithmetic.
+    /// Capped so that MAX_RENEW_EPOCHS_PER_CALL × MAX_STORAGE_PRICE × MAX_PROTOCOL_FEE_BPS < u64::MAX.
+    /// Compute: u64::MAX / (365 × 10000) ≈ 5.05T.
+    const MAX_STORAGE_PRICE: u64 = 5_000_000_000_000;
+
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
     const CONTRACT_VERSION: u64 = 4;
@@ -102,14 +114,10 @@ module auto_renewal::vault {
     const EInvalidFeeBps: u64 = 6;
     /// Treasury address has not been configured
     const ETreasuryNotSet: u64 = 7;
-    /// Caller does not hold the AdminCap
-    const ENotAdmin: u64 = 8;
     /// Vault still holds a blob or has remaining balance
     const EVaultNotEmpty: u64 = 9;
     /// System is paused
     const EPaused: u64 = 10;
-    /// Caller is not the operator
-    const ENotOperator: u64 = 11;
     /// Invalid address (e.g., zero address)
     const EInvalidAddress: u64 = 12;
     /// A withdrawal is already pending for this vault
@@ -120,8 +128,6 @@ module auto_renewal::vault {
     const EWithdrawDelayNotElapsed: u64 = 15;
     /// Invalid amount (e.g., zero)
     const EInvalidAmount: u64 = 16;
-    /// Renewal would leave insufficient balance for a pending withdrawal
-    const EPendingWithdrawShort: u64 = 17;
     /// No pending admin action to execute
     const ENoPendingAction: u64 = 18;
     /// Timelock delay has not yet elapsed
@@ -144,6 +150,10 @@ module auto_renewal::vault {
     const EMaxWithdrawDelayExceeded: u64 = 27;
     /// PauserCap has been revoked by admin — emergency operations blocked
     const EPauserRevoked: u64 = 28;
+    /// keeper_fee exceeds MAX_KEEPER_FEE
+    const EInvalidKeeperFee: u64 = 29;
+    /// storage_price_per_epoch exceeds MAX_STORAGE_PRICE
+    const EInvalidStoragePrice: u64 = 30;
 
 
     // ============================================================================
@@ -323,26 +333,24 @@ module auto_renewal::vault {
         max_total_epochs: u64,
     }
 
-    public struct FeeConfigUpdated has copy, drop {
-        treasury: address,
-        protocol_fee_bps: u64,
-        keeper_fee: u64,
+    /// Emitted when a renewal would succeed in paying the Walrus extend cost
+    /// but the remaining balance after renewal would be insufficient to cover
+    /// a pending withdrawal. Unlike InsufficientBalance (which deactivates
+    /// the policy), this is a temporary condition — the user can cancel the
+    /// pending withdrawal or deposit more WAL to unblock renewal.
+    public struct PendingWithdrawBlocksRenewal has copy, drop {
+        vault_id: ID,
+        blob_id: u256,
+        pending_amount: u64,
+        remaining_after_renewal: u64,
     }
 
     public struct Paused has copy, drop { }
 
     public struct Unpaused has copy, drop { }
 
-    public struct OperatorSet has copy, drop {
-        operator: address,
-    }
-
     public struct PauserCapRevoked has copy, drop {
         revoked_by: address,
-    }
-
-    public struct StoragePriceUpdated has copy, drop {
-        new_price_per_epoch: u64,
     }
 
     public struct AdminActionScheduled has copy, drop {
@@ -421,6 +429,12 @@ module auto_renewal::vault {
         };
         if (action == ACTION_SET_ADMIN_DELAY) {
             assert!(value_u64 >= MIN_ADMIN_DELAY_EPOCHS, EAdminDelayTooLow);
+        };
+        if (action == ACTION_SET_KEEPER_FEE) {
+            assert!(value_u64 <= MAX_KEEPER_FEE, EInvalidKeeperFee);
+        };
+        if (action == ACTION_SET_STORAGE_PRICE) {
+            assert!(value_u64 <= MAX_STORAGE_PRICE, EInvalidStoragePrice);
         };
 
         let current_epoch = tx_context::epoch(ctx);
@@ -682,6 +696,8 @@ module auto_renewal::vault {
     /// the WAL enters a pending state and can be finalized after the delay.
     /// If withdraw_delay_epochs == 0, the withdrawal settles immediately
     /// (same behavior as the original withdraw). Beneficiary only.
+    /// NOTE: This function intentionally does NOT check assert_not_paused —
+    /// users must always be able to withdraw their funds, even during a pause.
     entry fun initiate_withdraw(
         vault: &mut RenewalVault,
         amount: u64,
@@ -718,6 +734,8 @@ module auto_renewal::vault {
 
     /// Finalize a pending withdrawal after the delay has elapsed.
     /// Anyone can call this — the funds always go to vault.beneficiary.
+    /// NOTE: This function intentionally does NOT check assert_not_paused —
+    /// users must always be able to finalize their withdrawals, even during a pause.
     entry fun finalize_withdraw(
         vault: &mut RenewalVault,
         ctx: &mut TxContext
@@ -924,9 +942,18 @@ module auto_renewal::vault {
             return
         };
 
-        // 4b. Ensure renewal doesn't dip below a pending withdrawal
+        // 4b. Ensure renewal doesn't dip below a pending withdrawal.
+        // Unlike InsufficientBalance, this is temporary — the user can cancel
+        // the pending withdrawal or deposit more WAL. We emit an event so
+        // the keeper can alert the user, but do NOT deactivate the policy.
         if (available - total_needed < vault.pending_withdraw_amount) {
-            abort EPendingWithdrawShort
+            event::emit(PendingWithdrawBlocksRenewal {
+                vault_id: object::id(vault),
+                blob_id: vault.blob.borrow().blob_id(),
+                pending_amount: vault.pending_withdraw_amount,
+                remaining_after_renewal: available - total_needed,
+            });
+            return
         };
 
         // 5. Split fees and call extend_blob

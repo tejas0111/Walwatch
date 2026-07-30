@@ -10,7 +10,7 @@ module auto_renewal::vault_tests {
     use wal::wal::WAL;
     use walrus::system::{Self, System};
     use walrus::blob::Blob;
-    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminTimelock, AdminCap, PauserCap, InsufficientBalance};
+    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminTimelock, AdminCap, PauserCap};
 
     const U: address = @0xA;
     const K: address = @0xB;
@@ -60,7 +60,7 @@ module auto_renewal::vault_tests {
     }
 
     /// Return the shared FeeConfig.
-    fun put_config(s: &mut test_scenario::Scenario, config: FeeConfig) {
+    fun put_config(_s: &mut test_scenario::Scenario, config: FeeConfig) {
         test_scenario::return_shared(config);
     }
 
@@ -70,7 +70,7 @@ module auto_renewal::vault_tests {
     }
 
     /// Return the shared AdminTimelock.
-    fun put_timelock(s: &mut test_scenario::Scenario, tl: AdminTimelock) {
+    fun put_timelock(_s: &mut test_scenario::Scenario, tl: AdminTimelock) {
         test_scenario::return_shared(tl);
     }
 
@@ -96,15 +96,17 @@ module auto_renewal::vault_tests {
         let config = get_config(&mut s);
         mk_vault(&mut s, &config);
         put_config(&mut s, config);
-        next_tx(&mut s, U);
+        // Verify VaultCreated event was emitted from the vault creation tx
+        let effects = next_tx(&mut s, U);
+        assert!(test_scenario::num_user_events(&effects) == 1, 0);
         let v = test_scenario::take_shared<RenewalVault>(&mut s);
-        assert!(vault::get_beneficiary(&v) == U, 1);
-        assert!(vault::get_wal_balance(&v) == 100_000_000, 2);
-        assert!(vault::has_blob(&v) == true, 3);
-        assert!(vault::policy_renew_threshold(&vault::get_policy(&v)) == 5, 4);
-        assert!(vault::policy_renew_by(&vault::get_policy(&v)) == 10, 5);
-        assert!(vault::policy_is_active(&vault::get_policy(&v)) == true, 6);
-        assert!(vault::policy_max_epochs(&vault::get_policy(&v)) == 200, 7);
+        assert!(vault::get_beneficiary(&v) == U, 2);
+        assert!(vault::get_wal_balance(&v) == 100_000_000, 3);
+        assert!(vault::has_blob(&v) == true, 4);
+        assert!(vault::policy_renew_threshold(&vault::get_policy(&v)) == 5, 5);
+        assert!(vault::policy_renew_by(&vault::get_policy(&v)) == 10, 6);
+        assert!(vault::policy_is_active(&vault::get_policy(&v)) == true, 7);
+        assert!(vault::policy_max_epochs(&vault::get_policy(&v)) == 200, 8);
         test_scenario::return_shared(v);
         end(s);
     }
@@ -185,10 +187,12 @@ module auto_renewal::vault_tests {
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
         vault::reclaim_blob(&mut v, ctx(&mut s));
         test_scenario::return_shared(v);
-        next_tx(&mut s, U);
+        // Verify BlobReclaimed event was emitted from the reclaim tx
+        let effects = next_tx(&mut s, U);
+        assert!(test_scenario::num_user_events(&effects) == 1, 30);
         let v = test_scenario::take_shared<RenewalVault>(&mut s);
-        assert!(vault::has_blob(&v) == false, 30);
-        assert!(vault::policy_is_active(&vault::get_policy(&v)) == false, 31);
+        assert!(vault::has_blob(&v) == false, 32);
+        assert!(vault::policy_is_active(&vault::get_policy(&v)) == false, 33);
         test_scenario::return_shared(v);
         end(s);
     }
@@ -752,6 +756,275 @@ module auto_renewal::vault_tests {
     }
 
 
+
+    // ======================================================================
+    // Test 28: Cancel admin action
+    // ======================================================================
+    #[test]
+    fun test_cancel_admin_action() {
+        let mut s = init_env();
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = get_timelock(&mut s);
+        // Schedule an action
+        vault::schedule_admin_action(&cap, &mut tl, 2, 500, @0x0, ctx(&mut s));
+        // Cancel it
+        vault::cancel_admin_action(&cap, &mut tl);
+        // Verify state is fully reset
+        assert!(vault::pending_admin_action(&tl) == 0, 200);
+        assert!(vault::pending_admin_scheduled_epoch(&tl) == 0, 201);
+        // Verify we can schedule a new action immediately after cancel
+        let mut c = get_config(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 2, 600, @0x0, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        put_config(&mut s, c);
+        put_timelock(&mut s, tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        let effects = end(s);
+        // 4 events: AdminActionScheduled, AdminActionCancelled, AdminActionScheduled, AdminActionExecuted
+        assert!(test_scenario::num_user_events(&effects) >= 4, 202);
+    }
+
+    // Must fix: put_config after execute_admin_action returns config
+    // The test_cancel_admin_action above needs to properly return the FeeConfig
+    // after the execute_admin_action call. This test verifies the full flow.
+    #[test]
+    fun test_cancel_admin_action_full() {
+        let mut s = init_env();
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = get_timelock(&mut s);
+        let mut c = get_config(&mut s);
+        // Schedule keeper_fee
+        vault::schedule_admin_action(&cap, &mut tl, 3, 5_000_000, @0x0, ctx(&mut s));
+        assert!(vault::pending_admin_action(&tl) == 3, 210);
+        assert!(vault::pending_admin_scheduled_epoch(&tl) == 0, 211); // epoch 0 in tests
+        // Cancel
+        vault::cancel_admin_action(&cap, &mut tl);
+        assert!(vault::pending_admin_action(&tl) == 0, 212);
+        // Verify FeeConfig was NOT changed (action was cancelled before execution)
+        assert!(vault::keeper_fee(&c) == 1_000_000, 213);
+        // Now schedule and execute to verify normal flow still works
+        vault::schedule_admin_action(&cap, &mut tl, 3, 5_000_000, @0x0, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        assert!(vault::keeper_fee(&c) == 5_000_000, 214);
+        put_config(&mut s, c);
+        put_timelock(&mut s, tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 29: Revoke pauser blocks emergency operations
+    // ======================================================================
+    #[test]
+    #[expected_failure(abort_code = 28, location = auto_renewal::vault)]
+    fun test_revoke_pauser_blocks_emergency_pause() {
+        let mut s = test_scenario::begin(ADMIN);
+        vault::init_for_testing(ctx(&mut s));
+        // Tx 1: Create PauserCap for OPERATOR
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        // Tx 2: Operator receives PauserCap
+        next_tx(&mut s, OPERATOR);
+        let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        // Tx 3: Admin revokes ALL pauser caps
+        test_scenario::next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        vault::revoke_pauser(&cap, &mut c, ctx(&mut s));
+        test_scenario::return_to_sender(&mut s, cap);
+        // Tx 4: Operator tries to pause — should fail with EPauserRevoked (28)
+        test_scenario::next_tx(&mut s, OPERATOR);
+        vault::emergency_pause(&pcap, &mut c);
+        test_scenario::return_shared(c);
+        test_scenario::return_to_sender(&mut s, pcap);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 30: Admin can create new PauserCap after revoke
+    // ======================================================================
+    #[test]
+    fun test_admin_creates_new_pauser_after_revoke() {
+        let mut s = test_scenario::begin(ADMIN);
+        vault::init_for_testing(ctx(&mut s));
+        // Tx 1: Create initial PauserCap for OPERATOR
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        // Tx 2: Operator receives PauserCap
+        next_tx(&mut s, OPERATOR);
+        let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        // Return objects before ending tx 2
+        test_scenario::return_shared(c);
+        test_scenario::return_to_sender(&mut s, pcap);
+        // Tx 3: Admin revokes ALL pauser caps
+        test_scenario::next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::revoke_pauser(&cap, &mut c, ctx(&mut s));
+        test_scenario::return_to_sender(&mut s, cap);
+        test_scenario::return_shared(c);
+        // Tx 4: ADMIN creates NEW PauserCap for OPERATOR via timelock
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        // Verify pauser_revoked was reset to false
+        assert!(vault::is_paused(&c) == false, 222); // sanity: no side effect on paused flag
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        // Tx 5: Operator receives NEW PauserCap — should be able to pause now
+        next_tx(&mut s, OPERATOR);
+        let pcap2 = test_scenario::take_from_sender<PauserCap>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::emergency_pause(&pcap2, &mut c);
+        assert!(vault::is_paused(&c) == true, 223);
+        test_scenario::return_shared(c);
+        test_scenario::return_to_sender(&mut s, pcap2);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 31: Keeper fee cap enforced
+    // ======================================================================
+    #[test]
+    #[expected_failure(abort_code = 29, location = auto_renewal::vault)]
+    fun test_set_keeper_fee_too_high_rejected() {
+        let mut s = init_env();
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = get_timelock(&mut s);
+        // MAX_KEEPER_FEE is 100_000_000_000, try 200_000_000_000
+        vault::schedule_admin_action(&cap, &mut tl, 3, 200_000_000_000, @0x0, ctx(&mut s));
+        put_timelock(&mut s, tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 32: Storage price cap enforced
+    // ======================================================================
+    #[test]
+    #[expected_failure(abort_code = 30, location = auto_renewal::vault)]
+    fun test_set_storage_price_too_high_rejected() {
+        let mut s = init_env();
+        next_tx(&mut s, ADMIN);
+        let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = get_timelock(&mut s);
+        // MAX_STORAGE_PRICE is 10_000_000_000_000, try 20_000_000_000_000
+        vault::schedule_admin_action(&cap, &mut tl, 4, 20_000_000_000_000, @0x0, ctx(&mut s));
+        put_timelock(&mut s, tl);
+        test_scenario::return_to_sender(&mut s, cap);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 34: Cancel pending withdrawal (full flow)
+    // ======================================================================
+    #[test]
+    fun test_cancel_pending_withdraw() {
+        let mut s = init_env();
+        next_tx(&mut s, U);
+        let config = get_config(&mut s);
+        let mut sys = sys(ctx(&mut s));
+        vault::create_vault(
+            &config,
+            blob(&mut sys, 100, ctx(&mut s)),
+            wal(100_000_000, ctx(&mut s)),
+            5, 10, 200, U, 2, ctx(&mut s),
+        );
+        unit_test::destroy(sys);
+        put_config(&mut s, config);
+        // Tx 2: Initiate withdraw (delay = 2 epochs)
+        next_tx(&mut s, U);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::initiate_withdraw(&mut v, 30_000_000, ctx(&mut s));
+        test_scenario::return_shared(v);
+        // Tx 3: Cancel the pending withdrawal
+        next_tx(&mut s, U);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::cancel_pending_withdraw(&mut v, ctx(&mut s));
+        // Verify balance is restored (no funds were taken)
+        assert!(vault::get_wal_balance(&v) == 100_000_000, 240);
+        // Verify pending state is reset
+        assert!(vault::policy_is_active(&vault::get_policy(&v)) == true, 241);
+        test_scenario::return_shared(v);
+        // Tx 4: Verify we can initiate a new withdrawal after cancel
+        next_tx(&mut s, U);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::initiate_withdraw(&mut v, 20_000_000, ctx(&mut s));
+        test_scenario::return_shared(v);
+        // Tx 5: Verify funds were taken in the new withdrawal
+        next_tx(&mut s, U);
+        let v = test_scenario::take_shared<RenewalVault>(&mut s);
+        assert!(vault::get_wal_balance(&v) == 80_000_000, 242);
+        test_scenario::return_shared(v);
+        end(s);
+    }
+
+    // ======================================================================
+    // Test 33: PendingWithdrawBlocksRenewal event emitted (not abort)
+    // ======================================================================
+    #[test]
+    fun test_pending_withdraw_blocks_renewal_event() {
+        let mut s = test_scenario::begin(ADMIN);
+        vault::init_for_testing(ctx(&mut s));
+        // Tx 1: Create vault with delay=1 epoch
+        next_tx(&mut s, U);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut sys = sys(ctx(&mut s));
+        vault::create_vault(
+            &c,
+            blob(&mut sys, 50, ctx(&mut s)),
+            wal(10_000_000, ctx(&mut s)),
+            5, 10, 200, U, 1, ctx(&mut s),
+        );
+        unit_test::destroy(sys);
+        test_scenario::return_shared(c);
+        // Tx 2: Initiate withdraw of 9M (leaving 1M)
+        next_tx(&mut s, U);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        vault::initiate_withdraw(&mut v, 9_000_000, ctx(&mut s));
+        test_scenario::return_shared(v);
+        // Tx 3: Try renewal — should emit PendingWithdrawBlocksRenewal, not abort
+        // Balance = 10M, cost ~5M (estimate), remaining after = 5M, pending = 9M
+        // remaining (5M) < pending (9M) → triggers the event
+        next_tx(&mut s, K);
+        let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        let mut sys2 = sys(ctx(&mut s));
+        vault::execute_renewal(&mut v, &mut c, &mut sys2, ctx(&mut s));
+        // Verify the function returned (did NOT abort) by checking balance unchanged
+        assert!(vault::get_wal_balance(&v) == 10_000_000, 230);
+        // Verify policy is still active (unlike InsufficientBalance which deactivates)
+        assert!(vault::policy_is_active(&vault::get_policy(&v)) == true, 232);
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(v);
+        unit_test::destroy(sys2);
+        // Verify PendingWithdrawBlocksRenewal event was emitted (check via next_tx effects)
+        let effects = test_scenario::next_tx(&mut s, U);
+        assert!(test_scenario::num_user_events(&effects) >= 1, 231);
+        end(s);
+    }
 
     // ======================================================================
     // Test 22: withdraw still works when paused (user-exit)

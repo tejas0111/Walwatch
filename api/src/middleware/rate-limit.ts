@@ -85,18 +85,45 @@ class RedisStore implements RateLimitStore {
   private redisUrl: string;
   private client: any;
   private initPromise: Promise<void> | null;
+  private initTime: number;
   private fallbackStore: InMemoryStore;
+  private fallbackActive: boolean;
 
   constructor(redisUrl: string) {
     this.redisUrl = redisUrl;
     this.client = null;
     this.initPromise = null;
+    this.initTime = 0;
     this.fallbackStore = new InMemoryStore();
+    this.fallbackActive = false;
   }
 
   private async ensureClient(): Promise<void> {
-    if (this.client) return;
-    if (this.initPromise) return this.initPromise;
+    // If client exists and is ready, use it
+    if (this.client && this.client.status === 'ready') return;
+
+    // If we're in fallback mode, periodically retry Redis connection
+    if (this.fallbackActive) {
+      // Only retry once every 30 seconds to avoid connection storms
+      if (Date.now() - this.initTime < 30_000) {
+        return; // Stay in fallback mode
+      }
+      // Reset so we try connecting again
+      this.fallbackActive = false;
+      this.initTime = 0;
+    }
+
+    // If a connection attempt is already in progress, wait for it
+    if (this.initPromise) {
+      try {
+        await this.initPromise;
+        return;
+      } catch {
+        // Previous attempt failed, will try again
+        this.initPromise = null;
+      }
+    }
+
     this.initPromise = this.initClient();
     return this.initPromise;
   }
@@ -104,27 +131,67 @@ class RedisStore implements RateLimitStore {
   private async initClient(): Promise<void> {
     try {
       const { default: Redis } = await import('ioredis');
-      this.client = new Redis(this.redisUrl, {
+      const r = new Redis(this.redisUrl, {
         lazyConnect: true,
         enableOfflineQueue: false,
         maxRetriesPerRequest: 3,
+        retryStrategy(times) {
+          if (times > 5) {
+            console.error('[rate-limit] Max Redis reconnection attempts reached');
+            return null;
+          }
+          return Math.min(100 * Math.pow(2, times), 3000);
+        },
       });
-      await this.client.connect();
+
+      r.on('error', (err: Error) => {
+        console.error('[rate-limit] Redis client error:', err.message);
+      });
+
+      r.on('end', () => {
+        console.warn('[rate-limit] Redis connection permanently lost — falling back to in-memory');
+        this.fallbackActive = true;
+        this.initTime = Date.now();
+        this.client = null;
+      });
+
+      await r.connect();
+      this.client = r;
+      this.fallbackActive = false;
+      this.initTime = Date.now();
+      console.log('[rate-limit] Redis client connected');
     } catch (err) {
       console.error('[rate-limit] Failed to initialize Redis client — falling back to in-memory store');
       this.client = null;
+      this.fallbackActive = true;
+      this.initTime = Date.now();
+    } finally {
+      this.initPromise = null;
     }
   }
 
   async increment(key: string, windowMs: number, max: number): Promise<{ count: number; ttl: number }> {
     await this.ensureClient();
-    if (!this.client) {
+    if (!this.client || this.client.status !== 'ready') {
+      if (!this.fallbackActive) {
+        this.fallbackActive = true;
+        this.initTime = Date.now();
+        console.warn('[rate-limit] Redis unavailable — using in-memory fallback');
+      }
       return this.fallbackStore.increment(key, windowMs, max);
     }
-    const results = await this.client.eval(INCR_AND_SET_TTL_SCRIPT, 1, key, windowMs);
-    const count = Number(results[0]);
-    const ttl = Number(results[1]);
-    return { count, ttl: Math.max(0, ttl) };
+    try {
+      const results = await this.client.eval(INCR_AND_SET_TTL_SCRIPT, 1, key, windowMs);
+      const count = Number(results[0]);
+      const ttl = Number(results[1]);
+      return { count, ttl: Math.max(0, ttl) };
+    } catch (err) {
+      console.error('[rate-limit] Redis eval failed — falling back to in-memory:', (err as Error).message);
+      this.fallbackActive = true;
+      this.initTime = Date.now();
+      this.client = null;
+      return this.fallbackStore.increment(key, windowMs, max);
+    }
   }
 }
 
