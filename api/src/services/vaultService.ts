@@ -6,12 +6,12 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import pino from 'pino';
 import { withRetry } from '../lib/retry.js';
 import { SuiClientPool, createPoolFromEnv } from '../lib/sui-pool.js';
-import { decrypt } from '../lib/encryption.js';
 import { config } from '../config.js';
 import { selectGasCoin } from './gas-wallet-service.js';
 import { getDb } from '../db/index.js';
 import { users, subscriptions } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+import crypto from 'node:crypto';
 
 const logger = pino({ name: 'vault-service' });
 
@@ -44,7 +44,7 @@ interface CreateVaultRequest {
   initial_wal_amount: string;
   renew_threshold_epochs: number;
   renew_by_epochs: number;
-  max_total_epochs?: number;
+  max_total_epochs: number;
 }
 
 interface DepositRequest {
@@ -56,7 +56,7 @@ interface UpdatePolicyRequest {
   wallet_address: string;
   renew_threshold_epochs: number;
   renew_by_epochs: number;
-  max_total_epochs?: number;
+  max_total_epochs: number;
   active: boolean;
 }
 
@@ -99,32 +99,44 @@ export class SpendCapExceededError extends Error {
   constructor(limit: string) { super(`Spend cap exceeded: ${limit}`); }
 }
 
-export class ReAuthRequiredError extends Error {
-  constructor() { super('Withdraw requires fresh OAuth re-authentication (session < 15 min)'); }
-}
 
 const LOCK_TTL_MS = 30_000;
 
-async function acquireLock(key: string, ttlMs: number): Promise<boolean> {
+// Lua script for atomic compare-and-delete: only deletes `key` if its value
+// matches `token`. Prevents a delayed process from releasing someone else's lock.
+const COMPARE_AND_DELETE_SCRIPT = `
+  if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+  else
+    return 0
+  end
+`;
+
+async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
   try {
+    const token = crypto.randomUUID();
     const { default: redis } = await import('redis');
     const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
     await r.connect();
-    const acquired = await r.setNX(key, Date.now().toString());
-    if (acquired === 1) await r.pExpire(key, ttlMs);
+    const acquired = await r.setNX(key, token);
+    if (acquired === 1) {
+      await r.pExpire(key, ttlMs);
+      await r.quit();
+      return token;
+    }
     await r.quit();
-    return acquired === 1;
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function releaseLock(key: string): Promise<void> {
+async function releaseLock(key: string, token: string): Promise<void> {
   try {
     const { default: redis } = await import('redis');
     const r = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
     await r.connect();
-    await r.del(key);
+    await r.eval(COMPARE_AND_DELETE_SCRIPT, { keys: [key], arguments: [token] });
     await r.quit();
   } catch {
   }
@@ -134,12 +146,12 @@ async function withAddressLock<T>(address: string, fn: () => Promise<T>): Promis
   const lockKey = `gaslock:${address}`;
   const deadline = Date.now() + LOCK_TTL_MS * 2;
   while (Date.now() < deadline) {
-    const locked = await acquireLock(lockKey, LOCK_TTL_MS);
-    if (locked) {
+    const token = await acquireLock(lockKey, LOCK_TTL_MS);
+    if (token !== null) {
       try {
         return await fn();
       } finally {
-        await releaseLock(lockKey);
+        await releaseLock(lockKey, token);
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -147,83 +159,83 @@ async function withAddressLock<T>(address: string, fn: () => Promise<T>): Promis
   throw new Error(`Could not acquire lock for gas wallet ${address}`);
 }
 
-async function loadUserZkLogin(userId: string): Promise<{
-  keypair: Ed25519Keypair;
-  encryptedProof: string;
-  jwtRandomness: string;
-  maxEpoch: number;
+async function getUserZkLoginData(userId: string): Promise<{
   zkloginAddress: string;
+  jwtRandomness: string;
+  zkloginMaxEpoch: number | null;
 }> {
   const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!user || !user.ephemeralKeyEncrypted || !user.zkloginProofEncrypted) {
-    throw new Error('User zkLogin keys not set up. Complete OAuth login first.');
-  }
-  const keypairHex = decrypt(user.ephemeralKeyEncrypted);
-  const keypairBytes = Uint8Array.from(Buffer.from(keypairHex, 'hex'));
-  const keypair = Ed25519Keypair.fromSecretKey(keypairBytes);
-  return {
-    keypair,
-    encryptedProof: decrypt(user.zkloginProofEncrypted),
-    jwtRandomness: user.zkloginJwtRandomness || '',
-    maxEpoch: user.zkloginMaxEpoch || 0,
-    zkloginAddress: user.zkloginAddress || '',
-  };
-}
-
-async function getUserZkLoginAddress(userId: string): Promise<string> {
-  const db = getDb();
-  const [user] = await db.select({ zkloginAddress: users.zkloginAddress })
-    .from(users).where(eq(users.id, userId)).limit(1);
+  const [user] = await db.select({
+    zkloginAddress: users.zkloginAddress,
+    zkloginJwtRandomness: users.zkloginJwtRandomness,
+    zkloginMaxEpoch: users.zkloginMaxEpoch,
+  }).from(users).where(eq(users.id, userId)).limit(1);
   if (!user?.zkloginAddress) {
     throw new Error('User has no zkLogin address. Complete OAuth login first.');
   }
-  return user.zkloginAddress;
+  return {
+    zkloginAddress: user.zkloginAddress,
+    jwtRandomness: user.zkloginJwtRandomness || '',
+    zkloginMaxEpoch: user.zkloginMaxEpoch,
+  };
 }
 
-async function signAndSubmitTx(
+async function buildAndReturnTxBytes(
   tx: Transaction,
   userId: string,
   gasBudget: number,
+): Promise<{ txBytes: string; sender: string }> {
+  const pool = createPoolFromEnv({ threshold: 3, timeout: 30_000 });
+  const { zkloginAddress } = await getUserZkLoginData(userId);
+
+  tx.setSender(zkloginAddress);
+  tx.setGasBudget(gasBudget);
+
+  const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
+  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasWalletAddress = gasWalletKp.toSuiAddress();
+
+  return withAddressLock(gasWalletAddress, async () => {
+    const gasRef = await selectGasCoin(gasWalletAddress);
+    tx.setGasPayment([gasRef]);
+
+    const bytes = await pool.call(async (client) => tx.build({ client }));
+
+    return { txBytes: Buffer.from(bytes).toString('base64'), sender: zkloginAddress };
+  });
+}
+
+async function submitUserSignedTx(
+  txBytesBase64: string,
+  userSignature: string,
+  zkloginProof: any,
+  maxEpoch: number,
+  gasBudget: number,
 ): Promise<{ digest: string; effects: Record<string, unknown> }> {
-      const pool = createPoolFromEnv({ threshold: 3, timeout: 30_000 });
-      const { keypair, encryptedProof, maxEpoch } = await loadUserZkLogin(userId);
+  const pool = createPoolFromEnv({ threshold: 3, timeout: 30_000 });
+  const bytes = Uint8Array.from(Buffer.from(txBytesBase64, 'base64'));
 
-      tx.setSender(keypair.toSuiAddress());
-      tx.setGasBudget(gasBudget);
+  const zkLoginSig = getZkLoginSignature({
+    inputs: zkloginProof,
+    maxEpoch,
+    userSignature,
+  });
 
-      const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
-      const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
-      const gasWalletAddress = gasWalletKp.toSuiAddress();
+  const gasWalletBytes = Uint8Array.from(Buffer.from(GAS_WALLET_PRIMARY_KEY, 'hex'));
+  const gasWalletKp = Ed25519Keypair.fromSecretKey(gasWalletBytes);
+  const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
 
-      return withAddressLock(gasWalletAddress, async () => {
-        const gasRef = await selectGasCoin(gasWalletAddress);
-        tx.setGasPayment([gasRef]);
-
-        const bytes = await pool.call(async (client) => tx.build({ client }));
-
-        const userSig = (await keypair.signTransaction(bytes)).signature;
-
-        const zkLoginSig = getZkLoginSignature({
-          inputs: JSON.parse(encryptedProof),
-          maxEpoch,
-          userSignature: userSig,
-        });
-
-        const gasSig = (await gasWalletKp.signTransaction(bytes)).signature;
-
-        return pool.call(async (client) => {
-          const result = await client.executeTransactionBlock({
-            transactionBlock: bytes,
-            signature: [zkLoginSig, gasSig],
-            options: { showEffects: true },
-          });
-          return {
-            digest: result.digest,
-            effects: (result.effects || {}) as Record<string, unknown>,
-          };
-        });
-      });
+  return pool.call(async (client) => {
+    const result = await client.executeTransactionBlock({
+      transactionBlock: bytes,
+      signature: [zkLoginSig, gasSig],
+      options: { showEffects: true },
+    });
+    return {
+      digest: result.digest,
+      effects: (result.effects || {}) as Record<string, unknown>,
+    };
+  });
 }
 
 async function getSpendTotal(orgId: string, windowMs: number): Promise<number> {
@@ -271,12 +283,6 @@ async function getPlanLimits(orgId: string): Promise<{ maxPerTx: number; maxPerD
   }
 }
 
-function checkReAuth(sessionAgeMs: number): void {
-  if (sessionAgeMs > 15 * 60 * 1000) {
-    throw new ReAuthRequiredError();
-  }
-}
-
 async function checkWithdrawCaps(orgId: string, amount: number): Promise<void> {
   const limits = await getPlanLimits(orgId);
   if (amount > limits.maxPerTx) throw new SpendCapExceededError(`${limits.maxPerTx} WAL per tx`);
@@ -292,7 +298,7 @@ export class VaultService {
     this.pool = createPoolFromEnv({ threshold: 3, timeout: 30_000 });
   }
 
-  async createVault(
+  async buildCreateVaultTx(
     userId: string,
     orgId: string,
     params: {
@@ -300,16 +306,16 @@ export class VaultService {
       amount: number;
       threshold: number;
       extension: number;
-      maxEpochs?: number;
+      maxEpochs: number;
     },
-  ): Promise<{ vaultId: string; digest: string; status: string }> {
+  ): Promise<{ txBytes: string; sender: string; vaultId: string }> {
     this.ensurePackageId();
     return withAddressLock(userId, async () => {
-      const beneficiary = await getUserZkLoginAddress(userId);
+      const { zkloginAddress } = await getUserZkLoginData(userId);
       const tx = new Transaction();
       const walCoinArg = await this.selectWalCoin(
         tx,
-        beneficiary,
+        zkloginAddress,
         params.amount,
       );
 
@@ -323,26 +329,27 @@ export class VaultService {
           walCoinArg,
           tx.pure.u64(params.threshold),
           tx.pure.u64(params.extension),
-          tx.pure.option('u64', params.maxEpochs ?? null),
-          tx.pure.address(beneficiary),
+          tx.pure.u64(params.maxEpochs),
+          tx.pure.address(zkloginAddress),
           tx.pure.u64(withdrawDelayEpochs),
         ],
       });
 
-      const { digest, effects } = await signAndSubmitTx(tx, userId, 10_000_000);
-      const created = (effects as any)?.created?.[0];
-      const vaultId = created?.reference?.objectId || '';
-
-      return { vaultId, digest, status: (effects as any)?.status?.status ?? 'failure' };
+      const { txBytes, sender } = await buildAndReturnTxBytes(tx, userId, 10_000_000);
+      return { txBytes, sender, vaultId: '' };
     });
   }
 
-  async depositToVault(userId: string, vaultId: string, amount: number): Promise<{ digest: string }> {
+  async buildDepositTx(
+    userId: string,
+    vaultId: string,
+    amount: number,
+  ): Promise<{ txBytes: string; sender: string }> {
     this.ensurePackageId();
     return withAddressLock(userId, async () => {
-      const userAddress = await getUserZkLoginAddress(userId);
+      const { zkloginAddress } = await getUserZkLoginData(userId);
       const tx = new Transaction();
-      const walCoinArg = await this.selectWalCoin(tx, userAddress, amount);
+      const walCoinArg = await this.selectWalCoin(tx, zkloginAddress, amount);
 
       tx.moveCall({
         target: `${PACKAGE_ID}::vault::deposit`,
@@ -353,20 +360,17 @@ export class VaultService {
         ],
       });
 
-      const { digest } = await signAndSubmitTx(tx, userId, 5_000_000);
-      return { digest };
+      return buildAndReturnTxBytes(tx, userId, 5_000_000);
     });
   }
 
-  async withdrawFromVault(
+  async buildWithdrawTx(
     userId: string,
     orgId: string,
     vaultId: string,
     amount: number,
-    sessionAgeMs: number,
-  ): Promise<{ digest: string }> {
+  ): Promise<{ txBytes: string; sender: string }> {
     this.ensurePackageId();
-    checkReAuth(sessionAgeMs);
     await checkWithdrawCaps(orgId, amount);
 
     return withAddressLock(userId, async () => {
@@ -379,16 +383,15 @@ export class VaultService {
         ],
       });
 
-      const { digest } = await signAndSubmitTx(tx, userId, 5_000_000);
-      return { digest };
+      return buildAndReturnTxBytes(tx, userId, 5_000_000);
     });
   }
 
-  async updatePolicy(
+  async buildUpdatePolicyTx(
     userId: string,
     vaultId: string,
     request: UpdatePolicyRequest,
-  ): Promise<{ digest: string }> {
+  ): Promise<{ txBytes: string; sender: string }> {
     this.ensurePackageId();
     return withAddressLock(userId, async () => {
       const tx = new Transaction();
@@ -400,20 +403,19 @@ export class VaultService {
           tx.object(vaultId),
           tx.pure.u64(request.renew_threshold_epochs),
           tx.pure.u64(request.renew_by_epochs),
-          tx.pure.option('u64', request.max_total_epochs ?? null),
+          tx.pure.u64(request.max_total_epochs),
           tx.pure.bool(request.active),
         ],
       });
 
-      const { digest } = await signAndSubmitTx(tx, userId, 5_000_000);
-      return { digest };
+      return buildAndReturnTxBytes(tx, userId, 5_000_000);
     });
   }
 
-  async reclaimBlob(
+  async buildReclaimTx(
     userId: string,
     vaultId: string,
-  ): Promise<{ digest: string }> {
+  ): Promise<{ txBytes: string; sender: string }> {
     this.ensurePackageId();
     return withAddressLock(userId, async () => {
       const tx = new Transaction();
@@ -425,29 +427,24 @@ export class VaultService {
         ],
       });
 
-      const { digest } = await signAndSubmitTx(tx, userId, 5_000_000);
-      return { digest };
+      return buildAndReturnTxBytes(tx, userId, 5_000_000);
     });
   }
 
-  async buildCreateVaultTx(_request: CreateVaultRequest): Promise<string> {
-    throw new Error('buildCreateVaultTx removed — use createVault which signs and submits');
-  }
-
-  async buildDepositTx(_vaultId: string, _request: DepositRequest): Promise<string> {
-    throw new Error('buildDepositTx removed — use depositToVault which signs and submits');
-  }
-
-  async buildUpdatePolicyTx(_vaultId: string, _request: UpdatePolicyRequest): Promise<string> {
-    throw new Error('buildUpdatePolicyTx removed — use updatePolicy which signs and submits');
-  }
-
-  async buildWithdrawTx(_vaultId: string, _request: WithdrawRequest): Promise<string> {
-    throw new Error('buildWithdrawTx removed — use withdrawFromVault which signs and submits');
-  }
-
-  async buildReclaimTx(_vaultId: string, _request: ReclaimRequest): Promise<string> {
-    throw new Error('buildReclaimTx removed — use reclaimBlob which signs and submits');
+  async submitTx(bytes: {
+    txBytes: string;
+    userSignature: string;
+    zkloginProof: any;
+    maxEpoch: number;
+  }): Promise<{ digest: string }> {
+    const { digest } = await submitUserSignedTx(
+      bytes.txBytes,
+      bytes.userSignature,
+      bytes.zkloginProof,
+      bytes.maxEpoch,
+      10_000_000,
+    );
+    return { digest };
   }
 
   private async selectWalCoin(

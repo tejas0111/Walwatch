@@ -53,9 +53,21 @@ module auto_renewal::vault {
     /// Used in estimate_renewal_cost until Walrus exposes on-chain pricing.
     const DEFAULT_STORAGE_PRICE_PER_EPOCH: u64 = 1_000_000;
 
+    /// Default admin timelock delay in Sui epochs (~24h each on mainnet).
+    const DEFAULT_ADMIN_DELAY_EPOCHS: u64 = 1;
+
     /// Current contract version. Incremented on each upgrade.
     /// Used by migrate() to determine which migrations to run.
-    const CONTRACT_VERSION: u64 = 2;
+    const CONTRACT_VERSION: u64 = 3;
+
+    // Action type identifiers for AdminTimelock
+    const ACTION_NONE: u8 = 0;
+    const ACTION_SET_TREASURY: u8 = 1;
+    const ACTION_SET_PROTOCOL_FEE_BPS: u8 = 2;
+    const ACTION_SET_KEEPER_FEE: u8 = 3;
+    const ACTION_SET_STORAGE_PRICE: u8 = 4;
+    const ACTION_SET_PAUSER: u8 = 5;
+    const ACTION_SET_ADMIN_DELAY: u8 = 6;
 
     // ============================================================================
     // Error Codes
@@ -95,6 +107,14 @@ module auto_renewal::vault {
     const EInvalidAmount: u64 = 16;
     /// Renewal would leave insufficient balance for a pending withdrawal
     const EPendingWithdrawShort: u64 = 17;
+    /// No pending admin action to execute
+    const ENoPendingAction: u64 = 18;
+    /// Timelock delay has not yet elapsed
+    const ETimelockNotElapsed: u64 = 19;
+    /// Invalid admin action type
+    const EInvalidAction: u64 = 20;
+    /// An admin action is already pending
+    const EPendingActionExists: u64 = 21;
 
     // ============================================================================
     // Structs
@@ -112,6 +132,23 @@ module auto_renewal::vault {
     /// response without exposing full admin privileges.
     public struct PauserCap has key, store {
         id: UID,
+    }
+
+    /// Global admin timelock — scheduled admin actions wait `delay_epochs`
+    /// before execution, giving users time to react to parameter changes.
+    /// Created in init() and shared.
+    public struct AdminTimelock has key {
+        id: UID,
+        /// How many epochs an action must wait before it can be executed.
+        delay_epochs: u64,
+        /// Epoch when the current pending action was scheduled (0 = none).
+        scheduled_epoch: u64,
+        /// Action type identifier (ACTION_* constant).
+        action: u8,
+        /// u64 parameter (fee bps, keeper fee, storage price, admin delay).
+        value_u64: u64,
+        /// address parameter (treasury, pauser operator).
+        value_addr: address,
     }
 
     /// Global fee configuration, created in init() and shared.
@@ -167,8 +204,9 @@ module auto_renewal::vault {
         renew_threshold_epochs: u64,
         /// How many epochs to extend per renewal call
         renew_by_epochs: u64,
-        /// Optional safety cap — stop auto-renewing past this absolute end_epoch
-        max_total_epochs: Option<u64>,
+        /// Safety cap — stop auto-renewing past this absolute end_epoch.
+        /// Must extend past the current blob end_epoch at creation time.
+        max_total_epochs: u64,
         /// Whether the policy is currently active (beneficiary can pause)
         active: bool,
     }
@@ -194,7 +232,7 @@ module auto_renewal::vault {
         vault_id: ID,
         renew_threshold_epochs: u64,
         renew_by_epochs: u64,
-        max_total_epochs: Option<u64>,
+        max_total_epochs: u64,
         active: bool,
     }
 
@@ -269,6 +307,23 @@ module auto_renewal::vault {
         new_price_per_epoch: u64,
     }
 
+    public struct AdminActionScheduled has copy, drop {
+        action: u8,
+        value_u64: u64,
+        value_addr: address,
+        scheduled_epoch: u64,
+        delay_epochs: u64,
+        available_epoch: u64,
+    }
+
+    public struct AdminActionExecuted has copy, drop {
+        action: u8,
+    }
+
+    public struct AdminActionCancelled has copy, drop {
+        action: u8,
+    }
+
     // ============================================================================
     // Initialization
     // ============================================================================
@@ -288,91 +343,120 @@ module auto_renewal::vault {
         };
         transfer::share_object(fee_config);
 
+        let timelock = AdminTimelock {
+            id: object::new(ctx),
+            delay_epochs: DEFAULT_ADMIN_DELAY_EPOCHS,
+            scheduled_epoch: 0,
+            action: ACTION_NONE,
+            value_u64: 0,
+            value_addr: @0x0,
+        };
+        transfer::share_object(timelock);
+
         let admin_cap = AdminCap { id: object::new(ctx) };
         transfer::transfer(admin_cap, tx_context::sender(ctx));
     }
 
     // ============================================================================
-    // FeeConfig Administration
+    // AdminTimelock — All AdminCap operations go through this timelock
     // ============================================================================
 
-    /// Set the treasury address that receives protocol fees.
-    /// Requires AdminCap — only the deployer can call this.
-    entry fun set_treasury(
+    /// Schedule an admin action for timelocked execution.
+    /// Only one action can be pending at a time.
+    /// Requires AdminCap.
+    entry fun schedule_admin_action(
         _admin: &AdminCap,
-        config: &mut FeeConfig,
-        new_treasury: address,
+        timelock: &mut AdminTimelock,
+        action: u8,
+        value_u64: u64,
+        value_addr: address,
+        ctx: &TxContext,
     ) {
-        assert!(new_treasury != @0x0, ETreasuryNotSet);
-        config.treasury = new_treasury;
-        event::emit(FeeConfigUpdated {
-            treasury: new_treasury,
-            protocol_fee_bps: config.protocol_fee_bps,
-            keeper_fee: config.keeper_fee,
+        assert!(timelock.scheduled_epoch == 0, EPendingActionExists);
+        assert!(action > ACTION_NONE && action <= ACTION_SET_ADMIN_DELAY, EInvalidAction);
+        if (action == ACTION_SET_TREASURY) {
+            assert!(value_addr != @0x0, ETreasuryNotSet);
+        };
+        if (action == ACTION_SET_PROTOCOL_FEE_BPS) {
+            assert!(value_u64 <= MAX_PROTOCOL_FEE_BPS, EInvalidFeeBps);
+        };
+
+        let current_epoch = tx_context::epoch(ctx);
+        timelock.scheduled_epoch = current_epoch;
+        timelock.action = action;
+        timelock.value_u64 = value_u64;
+        timelock.value_addr = value_addr;
+
+        event::emit(AdminActionScheduled {
+            action,
+            value_u64,
+            value_addr,
+            scheduled_epoch: current_epoch,
+            delay_epochs: timelock.delay_epochs,
+            available_epoch: current_epoch + timelock.delay_epochs,
         });
     }
 
-    /// Set the protocol fee in basis points (0–10000 = 0%–100%).
-    /// Requires AdminCap — only the deployer can call this.
-    entry fun set_protocol_fee_bps(
-        _admin: &AdminCap,
+    /// Execute a previously scheduled admin action after the timelock delay
+    /// has elapsed. Permissionless — anyone can call this.
+    entry fun execute_admin_action(
+        timelock: &mut AdminTimelock,
         config: &mut FeeConfig,
-        new_fee_bps: u64,
-    ) {
-        assert!(new_fee_bps <= MAX_PROTOCOL_FEE_BPS, EInvalidFeeBps);
-        config.protocol_fee_bps = new_fee_bps;
-        event::emit(FeeConfigUpdated {
-            treasury: config.treasury,
-            protocol_fee_bps: new_fee_bps,
-            keeper_fee: config.keeper_fee,
-        });
-    }
-
-    /// Set the keeper fee paid to the executor.
-    /// Requires AdminCap — only the deployer can call this.
-    entry fun set_keeper_fee(
-        _admin: &AdminCap,
-        config: &mut FeeConfig,
-        new_fee: u64,
-    ) {
-        config.keeper_fee = new_fee;
-        event::emit(FeeConfigUpdated {
-            treasury: config.treasury,
-            protocol_fee_bps: config.protocol_fee_bps,
-            keeper_fee: new_fee,
-        });
-    }
-
-    /// Set the estimated storage price per epoch.
-    /// Requires AdminCap — only the deployer can call this.
-    /// Adjusts the estimate_renewal_cost calculation without modifying
-    /// actual Walrus storage pricing (which is determined at execution time).
-    entry fun set_storage_price(
-        _admin: &AdminCap,
-        config: &mut FeeConfig,
-        new_price: u64,
-    ) {
-        config.storage_price_per_epoch = new_price;
-        event::emit(StoragePriceUpdated { new_price_per_epoch: new_price });
-    }
-
-    // ============================================================================
-    // Operator & Pause Administration
-    // ============================================================================
-
-    /// Create a PauserCap and transfer it to the designated operator.
-    /// Requires AdminCap — only the deployer can designate operators.
-    /// The PauserCap authorizes emergency_pause / emergency_unpause.
-    entry fun create_pauser_cap(
-        _admin: &AdminCap,
-        operator: address,
         ctx: &mut TxContext,
     ) {
-        let cap = PauserCap { id: object::new(ctx) };
-        transfer::transfer(cap, operator);
+        assert!(timelock.scheduled_epoch > 0, ENoPendingAction);
+        assert!(
+            tx_context::epoch(ctx) >= timelock.scheduled_epoch + timelock.delay_epochs,
+            ETimelockNotElapsed,
+        );
 
-        event::emit(OperatorSet { operator });
+        let action = timelock.action;
+
+        if (action == ACTION_SET_TREASURY) {
+            config.treasury = timelock.value_addr;
+        } else if (action == ACTION_SET_PROTOCOL_FEE_BPS) {
+            config.protocol_fee_bps = timelock.value_u64;
+        } else if (action == ACTION_SET_KEEPER_FEE) {
+            config.keeper_fee = timelock.value_u64;
+        } else if (action == ACTION_SET_STORAGE_PRICE) {
+            config.storage_price_per_epoch = timelock.value_u64;
+        } else if (action == ACTION_SET_PAUSER) {
+            let cap = PauserCap { id: object::new(ctx) };
+            transfer::transfer(cap, timelock.value_addr);
+        } else if (action == ACTION_SET_ADMIN_DELAY) {
+            timelock.delay_epochs = timelock.value_u64;
+        } else {
+            abort EInvalidAction
+        };
+
+        // Reset pending state
+        timelock.scheduled_epoch = 0;
+        timelock.action = ACTION_NONE;
+        timelock.value_u64 = 0;
+        timelock.value_addr = @0x0;
+
+        event::emit(AdminActionExecuted { action });
     }
+
+    /// Cancel a pending admin action. Requires AdminCap.
+    entry fun cancel_admin_action(
+        _admin: &AdminCap,
+        timelock: &mut AdminTimelock,
+    ) {
+        assert!(timelock.scheduled_epoch > 0, ENoPendingAction);
+
+        let action = timelock.action;
+        timelock.scheduled_epoch = 0;
+        timelock.action = ACTION_NONE;
+        timelock.value_u64 = 0;
+        timelock.value_addr = @0x0;
+
+        event::emit(AdminActionCancelled { action });
+    }
+
+    // ============================================================================
+    // Pause Administration (NOT timelocked — emergency operations)
+    // ============================================================================
 
     /// Pause the system — blocks all vault operations.
     /// Requires PauserCap (held by the designated operator).
@@ -415,13 +499,14 @@ module auto_renewal::vault {
         initial_wal: Coin<WAL>,
         renew_threshold_epochs: u64,
         renew_by_epochs: u64,
-        max_total_epochs: Option<u64>,
+        max_total_epochs: u64,
         beneficiary: address,
         withdraw_delay_epochs: u64,
         ctx: &mut TxContext
     ) {
         assert_not_paused(config);
         let current_epoch = tx_context::epoch(ctx);
+        assert!(max_total_epochs > (blob.end_epoch() as u64), 0); // must extend past current end
         let blob_id = blob.blob_id();
 
         let vault = RenewalVault {
@@ -499,7 +584,7 @@ module auto_renewal::vault {
         vault: &mut RenewalVault,
         renew_threshold_epochs: u64,
         renew_by_epochs: u64,
-        max_total_epochs: Option<u64>,
+        max_total_epochs: u64,
         active: bool,
         ctx: &TxContext
     ) {
@@ -704,22 +789,19 @@ module auto_renewal::vault {
 
         // 3. Apply max_total_epochs safety cap
         let mut actual_renew_epochs = vault.policy.renew_by_epochs;
+        let max_epochs = vault.policy.max_total_epochs;
 
-        if (vault.policy.max_total_epochs.is_some()) {
-            let max_epochs = *vault.policy.max_total_epochs.borrow();
-
-            if ((end_epoch as u64) + actual_renew_epochs > max_epochs) {
-                if (max_epochs <= (end_epoch as u64)) {
-                    vault.policy.active = false;
-                    event::emit(PolicyExhausted {
-                        vault_id: object::id(vault),
-                        blob_id: vault.blob.borrow().blob_id(),
-                        max_total_epochs: max_epochs,
-                    });
-                    return
-                };
-                actual_renew_epochs = max_epochs - (end_epoch as u64);
+        if ((end_epoch as u64) + actual_renew_epochs > max_epochs) {
+            if (max_epochs <= (end_epoch as u64)) {
+                vault.policy.active = false;
+                event::emit(PolicyExhausted {
+                    vault_id: object::id(vault),
+                    blob_id: vault.blob.borrow().blob_id(),
+                    max_total_epochs,
+                });
+                return
             };
+            actual_renew_epochs = max_epochs - (end_epoch as u64);
         };
 
         // 4. Compute fees and check balance
@@ -736,12 +818,13 @@ module auto_renewal::vault {
         let total_needed = estimated_cost + protocol_fee + keeper_fee;
 
         if (available < total_needed) {
+            vault.policy.active = false;
             event::emit(InsufficientBalance {
                 vault_id: object::id(vault),
                 required: total_needed,
                 available,
             });
-            abort EInsufficientBalance
+            return
         };
 
         // 4b. Ensure renewal doesn't dip below a pending withdrawal
@@ -878,6 +961,21 @@ module auto_renewal::vault {
         config.version
     }
 
+    /// Get the admin timelock delay in epochs.
+    public fun admin_delay(timelock: &AdminTimelock): u64 {
+        timelock.delay_epochs
+    }
+
+    /// Get the pending admin action (0 = none).
+    public fun pending_admin_action(timelock: &AdminTimelock): u8 {
+        timelock.action
+    }
+
+    /// Get the epoch when the pending action was scheduled (0 = none).
+    public fun pending_admin_scheduled_epoch(timelock: &AdminTimelock): u64 {
+        timelock.scheduled_epoch
+    }
+
     // ============================================================================
     // Policy Field Getters (needed by test modules in separate module)
     // ============================================================================
@@ -893,7 +991,7 @@ module auto_renewal::vault {
     }
 
     /// Get the max_total_epochs cap from a policy.
-    public fun policy_max_epochs(policy: &RenewalPolicy): Option<u64> {
+    public fun policy_max_epochs(policy: &RenewalPolicy): u64 {
         policy.max_total_epochs
     }
 
@@ -921,6 +1019,16 @@ module auto_renewal::vault {
         };
         transfer::share_object(fee_config);
 
+        let timelock = AdminTimelock {
+            id: object::new(ctx),
+            delay_epochs: 0, // tests bypass delay
+            scheduled_epoch: 0,
+            action: ACTION_NONE,
+            value_u64: 0,
+            value_addr: @0x0,
+        };
+        transfer::share_object(timelock);
+
         let admin_cap = AdminCap { id: object::new(ctx) };
         transfer::transfer(admin_cap, tx_context::sender(ctx));
     }
@@ -940,13 +1048,19 @@ module auto_renewal::vault {
     ///   - v1 → v2: (placeholder for future upgrades)
     #[ext(migration)]
     fun migrate(
-        _upgrade_cap: &UpgradeCap,
+        upgrade_cap: &UpgradeCap,
         config: &mut FeeConfig,
         _ctx: &mut TxContext,
     ) {
+        // Verify the UpgradeCap actually belongs to this package.
+        // The Sui framework already enforces this, but the explicit
+        // check provides defense in depth against misconfigured upgrades.
+        assert!(sui::package::package_id(upgrade_cap) == @auto_renewal, 0);
+
         // Handle migration from previous versions
         if (config.version < CONTRACT_VERSION) {
             // v1 → v2: add new fields (handled by struct layout compat)
+            // v2 → v3: AdminTimelock added via init() on upgrade (new shared object)
             config.version = CONTRACT_VERSION;
         };
     }

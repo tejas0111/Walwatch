@@ -110,7 +110,7 @@ struct RenewalVault has key {
 struct RenewalPolicy has store, copy, drop {
     renew_threshold_epochs: u64,  // trigger renewal when <= this many epochs remain
     renew_by_epochs: u64,         // how many epochs to add per renewal
-    max_total_epochs: Option<u64>,// safety cap: stop auto-renewing past this end_epoch
+    max_total_epochs: u64,        // safety cap: must extend past current end_epoch at creation
     active: bool,                 // beneficiary can pause without withdrawing
 }
 ```
@@ -123,10 +123,11 @@ public entry fun create_vault(
     initial_wal: Coin<WAL>,
     renew_threshold_epochs: u64,
     renew_by_epochs: u64,
-    max_total_epochs: Option<u64>,
+    max_total_epochs: u64,
     ctx: &mut TxContext
 )
 // Transfers the blob and WAL into a new shared RenewalVault.
+// Requires max_total_epochs > blob.end_epoch().
 // Emits VaultCreated { vault_id, beneficiary, blob_id }.
 
 public entry fun deposit(vault: &mut RenewalVault, coin: Coin<WAL>)

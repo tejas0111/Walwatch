@@ -1,6 +1,5 @@
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
-import { Transaction } from '@mysten/sui/transactions';
 import pino from 'pino';
 import { config } from '../config.js';
 
@@ -19,7 +18,9 @@ let standbyKeypair: Ed25519Keypair | null = null;
 
 const GAS_WALLET_PRIMARY_KEY = process.env.GAS_WALLET_PRIMARY_KEY;
 const GAS_WALLET_STANDBY_KEY = process.env.GAS_WALLET_STANDBY_KEY;
-const GAS_WALLET_COLD_KEY = process.env.GAS_WALLET_COLD_KEY;
+// Cold reserve top-up is a manual/offline step — the cold key MUST NOT
+// reside in the hot API process. Use a separate script or hardware wallet
+// to periodically refill the primary gas wallet.
 
 function ensurePrimary(): Ed25519Keypair {
   if (!primaryKeypair) {
@@ -57,32 +58,23 @@ export async function checkBalance(): Promise<{ primary: bigint; standby: bigint
   return { primary: BigInt(primary.totalBalance), standby: BigInt(await standbyBalance), status };
 }
 
-export async function selectGasCoin(ownerAddress: string): Promise<GasObjectRef> {
+export async function selectGasCoin(ownerAddress: string, minBalance?: bigint): Promise<GasObjectRef> {
   const coins = await client.getCoins({ owner: ownerAddress, coinType: '0x2::sui::SUI' });
   if (!coins.data || coins.data.length === 0) {
     throw new Error(`No SUI gas coins found for gas wallet ${ownerAddress}`);
   }
-  const coin = coins.data[0];
-  return { objectId: coin.coinObjectId, version: coin.version, digest: coin.digest };
+  // Prefer a coin that individually covers the minimum balance.
+  // If none qualifies, fall back to the largest coin (merge coins offline instead).
+  const threshold = minBalance ?? BigInt(10_000_000);
+  const sorted = [...coins.data].sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
+  const best = sorted.find((c) => BigInt(c.balance) >= threshold) ?? sorted[0];
+  return { objectId: best.coinObjectId, version: best.version, digest: best.digest };
 }
 
-export async function topUpFromColdReserve(amount: bigint): Promise<string> {
-  if (!GAS_WALLET_COLD_KEY) throw new Error('Cold reserve key not configured');
-  const coldKeyBytes = Uint8Array.from(Buffer.from(GAS_WALLET_COLD_KEY, 'hex'));
-  const coldKeypair = Ed25519Keypair.fromSecretKey(coldKeyBytes);
-  const kp = ensurePrimary();
-  const tx = new Transaction();
-  tx.transferObjects([tx.gas], kp.toSuiAddress());
-  tx.setSender(coldKeypair.toSuiAddress());
-
-  const result = await client.signAndExecuteTransaction({
-    transaction: tx,
-    signer: coldKeypair,
-    options: { showEffects: true },
-  });
-
-  return result.digest;
-}
+/** Cold-reserve top-up is a manual/offline step. The gas wallet must be
+ *  refilled externally (e.g., via a separate offline signing process or
+ *  hardware wallet). This function is intentionally not implemented in
+ *  the hot API process — remove GAS_WALLET_COLD_KEY from the environment. */
 
 let balanceMonitorInterval: ReturnType<typeof setInterval> | null = null;
 

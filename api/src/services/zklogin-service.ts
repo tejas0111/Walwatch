@@ -1,7 +1,7 @@
 import { computeZkLoginAddress, jwtToAddress, getZkLoginSignature, generateNonce, generateRandomness } from '@mysten/sui/zklogin';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { PublicKey } from '@mysten/sui/cryptography';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 
 const APP_SALT_SECRET = (() => {
@@ -13,8 +13,8 @@ const APP_SALT_SECRET = (() => {
 })();
 
 export function computeSalt(oauthSubject: string): string {
-  const hmac = createHash('sha256')
-    .update(`${oauthSubject}:${APP_SALT_SECRET}`)
+  const hmac = createHmac('sha256', APP_SALT_SECRET)
+    .update(oauthSubject)
     .digest('hex');
   return BigInt('0x' + hmac).toString();
 }

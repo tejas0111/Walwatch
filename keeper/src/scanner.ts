@@ -51,8 +51,8 @@ export interface DueVault {
   renewThresholdEpochs: number;
   /** How many epochs to extend per renewal call */
   renewByEpochs: number;
-  /** Optional absolute end-epoch cap (null if no limit) */
-  maxTotalEpochs: number | null;
+  /** Safety cap — renewals stop past this absolute end-epoch (0 = no effective cap) */
+  maxTotalEpochs: number;
   /** Whether the renewal policy is currently active */
   active: boolean;
   /** The blob's current storage end epoch */
@@ -517,8 +517,8 @@ export class VaultScanner {
         ? this.asNumber(policyFields.renew_by_epochs)
         : 0;
       const maxTotalEpochs = policyFields
-        ? this.parseOptionU64(policyFields.max_total_epochs)
-        : null;
+        ? this.asNumber(policyFields.max_total_epochs)
+        : 0;
       const active = policyFields ? this.asBoolean(policyFields.active) : false;
 
       const walBalance = this.asBigInt(fields.wal_balance);

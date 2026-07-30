@@ -7,7 +7,7 @@ import pino from 'pino';
 import { requireAuth } from '../middleware/auth.js';
 import { requireOrg } from '../middleware/org-scope.js';
 import { logAudit } from '../middleware/audit.js';
-import { VaultService, SpendCapExceededError, ReAuthRequiredError } from '../services/vaultService.js';
+import { VaultService, SpendCapExceededError } from '../services/vaultService.js';
 import { ErrorCodes } from '../lib/errors.js';
 import { rateLimit } from '../middleware/rate-limit.js';
 import { getDb } from '../db/index.js';
@@ -17,7 +17,6 @@ import { eq, and } from 'drizzle-orm';
 type Variables = {
   userId: string;
   orgId: string;
-  authTime: number;
 };
 
 const router = new Hono<{ Variables: Variables }>();
@@ -56,7 +55,7 @@ const createVaultSchema = z.object({
   initial_wal_amount: z.string().min(1),
   renew_threshold_epochs: z.number().int().positive(),
   renew_by_epochs: z.number().int().positive(),
-  max_total_epochs: z.number().int().positive().optional(),
+  max_total_epochs: z.number().int().positive(),
 });
 
 const depositSchema = z.object({
@@ -68,7 +67,7 @@ const updatePolicySchema = z.object({
   wallet_address: suiAddressSchema,
   renew_threshold_epochs: z.number().int().positive(),
   renew_by_epochs: z.number().int().positive(),
-  max_total_epochs: z.number().int().positive().optional(),
+  max_total_epochs: z.number().int().positive(),
   active: z.boolean(),
 });
 
@@ -81,7 +80,7 @@ const reclaimSchema = z.object({
   wallet_address: suiAddressSchema,
 });
 
-// POST /api/vaults — Create vault (sign+submit)
+// POST /api/vaults — Build unsigned create-vault tx
 router.post('/', zValidator('json', createVaultSchema), async (c) => {
   try {
     const body = c.req.valid('json');
@@ -90,20 +89,17 @@ router.post('/', zValidator('json', createVaultSchema), async (c) => {
     }
     const userId = c.get('userId');
     const orgId = c.get('orgId');
-    const result = await vaultService.createVault(userId, orgId, {
+    const result = await vaultService.buildCreateVaultTx(userId, orgId, {
       blobId: body.blob_id,
       amount: Number(body.initial_wal_amount),
       threshold: body.renew_threshold_epochs,
       extension: body.renew_by_epochs,
       maxEpochs: body.max_total_epochs,
     });
-    await logAudit(c, 'vault.created', 'vault', result.vaultId, { blobId: body.blob_id, digest: result.digest });
+    await logAudit(c, 'vault.created', 'vault', '', { blobId: body.blob_id, txBytes: result.txBytes.substring(0, 16) + '…' });
     return c.json(result);
   } catch (error) {
-    if (error instanceof SpendCapExceededError) {
-      return c.json({ error: { message: error.message, code: ErrorCodes.RATE_LIMITED } }, 429);
-    }
-    log.error({ error }, 'Failed to create vault');
+    log.error({ error }, 'Failed to build create-vault tx');
     return c.json({ error: { message: 'Vault creation failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
   }
 });
@@ -132,7 +128,7 @@ router.get('/', async (c) => {
   }
 });
 
-// POST /api/vaults/:vaultId/deposit — Deposit (sign+submit)
+// POST /api/vaults/:vaultId/deposit — Build unsigned deposit tx
 router.post('/:vaultId/deposit', zValidator('json', depositSchema), async (c) => {
   try {
     const { vaultId } = c.req.param();
@@ -141,16 +137,16 @@ router.post('/:vaultId/deposit', zValidator('json', depositSchema), async (c) =>
       return c.json({ error: { message: 'Wallet address does not belong to this organization', code: ErrorCodes.FORBIDDEN } }, 403);
     }
     const userId = c.get('userId');
-    const result = await vaultService.depositToVault(userId, vaultId, Number(body.amount));
-    await logAudit(c, 'vault.deposited', 'vault', vaultId, { amount: body.amount, digest: result.digest });
+    const result = await vaultService.buildDepositTx(userId, vaultId, Number(body.amount));
+    await logAudit(c, 'vault.deposited', 'vault', vaultId, { amount: body.amount, txBytes: result.txBytes.substring(0, 16) + '…' });
     return c.json(result);
   } catch (error) {
-    log.error({ error }, 'Failed to deposit');
+    log.error({ error }, 'Failed to build deposit tx');
     return c.json({ error: { message: 'Deposit failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
   }
 });
 
-// POST /api/vaults/:vaultId/policy — Update policy (sign+submit)
+// POST /api/vaults/:vaultId/policy — Build unsigned policy-update tx
 router.post('/:vaultId/policy', zValidator('json', updatePolicySchema), async (c) => {
   try {
     const { vaultId } = c.req.param();
@@ -159,16 +155,16 @@ router.post('/:vaultId/policy', zValidator('json', updatePolicySchema), async (c
       return c.json({ error: { message: 'Wallet address does not belong to this organization', code: ErrorCodes.FORBIDDEN } }, 403);
     }
     const userId = c.get('userId');
-    const result = await vaultService.updatePolicy(userId, vaultId, body);
-    await logAudit(c, 'vault.policy_updated', 'vault', vaultId, { digest: result.digest });
+    const result = await vaultService.buildUpdatePolicyTx(userId, vaultId, body);
+    await logAudit(c, 'vault.policy_updated', 'vault', vaultId, { txBytes: result.txBytes.substring(0, 16) + '…' });
     return c.json(result);
   } catch (error) {
-    log.error({ error }, 'Failed to update policy');
+    log.error({ error }, 'Failed to build policy-update tx');
     return c.json({ error: { message: 'Policy update failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
   }
 });
 
-// POST /api/vaults/:vaultId/withdraw — Initiate withdrawal (sign+submit, re-auth gated)
+// POST /api/vaults/:vaultId/withdraw — Build unsigned withdraw tx (re-auth gated)
 router.post('/:vaultId/withdraw', zValidator('json', withdrawSchema), async (c) => {
   try {
     const { vaultId } = c.req.param();
@@ -178,24 +174,19 @@ router.post('/:vaultId/withdraw', zValidator('json', withdrawSchema), async (c) 
     }
     const userId = c.get('userId');
     const orgId = c.get('orgId');
-    const authTime = c.get('authTime') as number | undefined;
-    const sessionAgeMs = authTime != null ? Date.now() - authTime * 1000 : Infinity;
-    const result = await vaultService.withdrawFromVault(userId, orgId, vaultId, Number(body.amount), sessionAgeMs);
-    await logAudit(c, 'vault.withdrawn', 'vault', vaultId, { amount: body.amount, digest: result.digest });
+    const result = await vaultService.buildWithdrawTx(userId, orgId, vaultId, Number(body.amount));
+    await logAudit(c, 'vault.withdrawn', 'vault', vaultId, { amount: body.amount, txBytes: result.txBytes.substring(0, 16) + '…' });
     return c.json(result);
   } catch (error) {
     if (error instanceof SpendCapExceededError) {
       return c.json({ error: { message: error.message, code: ErrorCodes.RATE_LIMITED } }, 429);
     }
-    if (error instanceof ReAuthRequiredError) {
-      return c.json({ error: { message: error.message, code: 'REAUTH_REQUIRED' } }, 401);
-    }
-    log.error({ error }, 'Failed to withdraw');
+    log.error({ error }, 'Failed to build withdraw tx');
     return c.json({ error: { message: 'Withdrawal failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
   }
 });
 
-// POST /api/vaults/:vaultId/reclaim — Reclaim blob (sign+submit)
+// POST /api/vaults/:vaultId/reclaim — Build unsigned reclaim tx
 router.post('/:vaultId/reclaim', zValidator('json', reclaimSchema), async (c) => {
   try {
     const { vaultId } = c.req.param();
@@ -204,12 +195,31 @@ router.post('/:vaultId/reclaim', zValidator('json', reclaimSchema), async (c) =>
       return c.json({ error: { message: 'Wallet address does not belong to this organization', code: ErrorCodes.FORBIDDEN } }, 403);
     }
     const userId = c.get('userId');
-    const result = await vaultService.reclaimBlob(userId, vaultId);
-    await logAudit(c, 'vault.reclaimed', 'vault', vaultId, { digest: result.digest });
+    const result = await vaultService.buildReclaimTx(userId, vaultId);
+    await logAudit(c, 'vault.reclaimed', 'vault', vaultId, { txBytes: result.txBytes.substring(0, 16) + '…' });
     return c.json(result);
   } catch (error) {
-    log.error({ error }, 'Failed to reclaim blob');
+    log.error({ error }, 'Failed to build reclaim tx');
     return c.json({ error: { message: 'Reclaim failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
+  }
+});
+
+const submitSchema = z.object({
+  txBytes: z.string().min(1),
+  userSignature: z.string().min(1),
+  zkloginProof: z.any(),
+  maxEpoch: z.number().int().positive(),
+});
+
+// POST /api/vaults/submit — Submit a user-signed transaction
+router.post('/submit', zValidator('json', submitSchema), async (c) => {
+  try {
+    const body = c.req.valid('json') as { txBytes: string; userSignature: string; zkloginProof: any; maxEpoch: number };
+    const result = await vaultService.submitTx(body);
+    return c.json(result);
+  } catch (error) {
+    log.error({ error }, 'Failed to submit tx');
+    return c.json({ error: { message: 'Transaction submission failed', code: ErrorCodes.INTERNAL_ERROR } }, 500);
   }
 });
 

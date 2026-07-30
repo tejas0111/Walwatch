@@ -1433,7 +1433,7 @@ export class WalwatchClient {
    * @param data.initial_wal_amount - Initial WAL amount to deposit
    * @param data.renew_threshold_epochs - Epochs before expiry to trigger renewal
    * @param data.renew_by_epochs - Number of epochs to extend on each renewal
-   * @param data.max_total_epochs - Optional maximum total epochs
+   * @param data.max_total_epochs - Maximum total epochs cap (renewals stop past this)
    * @returns The created vault transaction
    * @throws {WalwatchValidationError} If parameters are invalid
    *
@@ -1496,7 +1496,7 @@ export class WalwatchClient {
    * @param data.wallet_address - Wallet address (must match vault owner)
    * @param data.renew_threshold_epochs - New renewal threshold
    * @param data.renew_by_epochs - New renewal extension
-   * @param data.max_total_epochs - Optional new max total epochs
+   * @param data.max_total_epochs - New max total epochs cap (renewals stop past this)
    * @param data.active - Whether the renewal policy is active
    * @returns The vault transaction
    *
@@ -1514,7 +1514,7 @@ export class WalwatchClient {
     wallet_address: string;
     renew_threshold_epochs: number;
     renew_by_epochs: number;
-    max_total_epochs?: number;
+    max_total_epochs: number;
     active: boolean;
   }): Promise<VaultTransaction> {
     return this.requestWithRetry<VaultTransaction>('POST', `/vaults/${vaultId}/policy`, data);
@@ -1888,6 +1888,7 @@ export class WalwatchClient {
         wallet_address: options?.wallet_address || '',
         renew_threshold_epochs: 0,
         renew_by_epochs: 0,
+        max_total_epochs: 0,
         active: false,
       });
     }
@@ -1898,6 +1899,7 @@ export class WalwatchClient {
         wallet_address: options?.wallet_address || '',
         renew_threshold_epochs: options?.amount || 5,
         renew_by_epochs: 10,
+        max_total_epochs: 10000,
         active: true,
       });
     }

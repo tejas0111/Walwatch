@@ -95,26 +95,39 @@ FeeConfig ID:   0x...
 AdminCap ID:    0x...
 ```
 
-After deployment, **the FeeConfig treasury must be configured** using the AdminCap:
+After deployment, **the FeeConfig treasury must be configured** using the AdminCap.
+All admin operations go through a timelock (`AdminTimelock` shared object) — first
+schedule, then execute after the delay (default 1 epoch ~24h on mainnet):
 
 ```bash
-# Set the treasury address (required before any renewal can execute)
+# Schedule treasury change
 sui client call \
   --package <PACKAGE_ID> \
   --module vault \
-  --function set_treasury \
-  --args <ADMIN_CAP_ID> <FEE_CONFIG_ID> <TREASURY_ADDRESS> \
+  --function schedule_admin_action \
+  --args <ADMIN_CAP_ID> <TIMELOCK_ID> 1 0 <TREASURY_ADDRESS> \
+  --gas-budget 10000000
+
+# Execute treasury change (after 1 epoch delay)
+sui client call \
+  --package <PACKAGE_ID> \
+  --module vault \
+  --function execute_admin_action \
+  --args <TIMELOCK_ID> <FEE_CONFIG_ID> \
   --gas-budget 10000000
 ```
 
-Optional — adjust fees:
+Optional — adjust fees (action types: 1=treasury, 2=fee_bps, 3=keeper_fee, 4=storage_price):
 
 ```bash
-# Set protocol fee (basis points, e.g., 200 = 2%)
-sui client call ... --function set_protocol_fee_bps --args <ADMIN_CAP_ID> <FEE_CONFIG_ID> 200
+# Schedule protocol fee change (200 = 2%)
+sui client call ... --function schedule_admin_action --args <ADMIN_CAP_ID> <TIMELOCK_ID> 2 200 0x0
 
-# Set keeper fee (in MIST)
-sui client call ... --function set_keeper_fee --args <ADMIN_CAP_ID> <FEE_CONFIG_ID> 1000000
+# Schedule keeper fee change (1_000_000 MIST)
+sui client call ... --function schedule_admin_action --args <ADMIN_CAP_ID> <TIMELOCK_ID> 3 1000000 0x0
+
+# Execute pending action (anyone can call after delay)
+sui client call ... --function execute_admin_action --args <TIMELOCK_ID> <FEE_CONFIG_ID>
 ```
 
 ### Step 2: Deploy Infrastructure
@@ -256,11 +269,17 @@ Prevention: Set up `KeeperGasBalance` CloudWatch alarm (configured in Terraform)
 
 If treasury is not set, `execute_renewal` will abort with `ETreasuryNotSet` (error code 7).
 
-Fix:
+Fix (via timelock):
 ```bash
+# Schedule
 sui client call --package <PACKAGE_ID> --module vault \
-  --function set_treasury \
-  --args <ADMIN_CAP_ID> <FEE_CONFIG_ID> <TREASURY_ADDRESS> \
+  --function schedule_admin_action \
+  --args <ADMIN_CAP_ID> <TIMELOCK_ID> 1 0 <TREASURY_ADDRESS> \
+  --gas-budget 10000000
+# Execute (after delay)
+sui client call --package <PACKAGE_ID> --module vault \
+  --function execute_admin_action \
+  --args <TIMELOCK_ID> <FEE_CONFIG_ID> \
   --gas-budget 10000000
 ```
 

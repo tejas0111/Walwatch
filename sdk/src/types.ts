@@ -226,7 +226,7 @@ export interface CreateVaultParams {
   initial_wal_amount: string;
   renew_threshold_epochs: number;
   renew_by_epochs: number;
-  max_total_epochs?: number;
+  max_total_epochs: number;
 }
 
 export interface PaginatedResponse<T> {

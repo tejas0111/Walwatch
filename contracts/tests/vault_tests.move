@@ -10,7 +10,7 @@ module auto_renewal::vault_tests {
     use wal::wal::WAL;
     use walrus::system::{Self, System};
     use walrus::blob::Blob;
-    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminCap, PauserCap};
+    use auto_renewal::vault::{Self, RenewalVault, FeeConfig, AdminTimelock, AdminCap, PauserCap, InsufficientBalance};
 
     const U: address = @0xA;
     const K: address = @0xB;
@@ -24,14 +24,17 @@ module auto_renewal::vault_tests {
     /// Init env: call init_for_testing in tx 0, then set treasury in tx 1.
     fun init_env(): test_scenario::Scenario {
         let mut s = test_scenario::begin(ADMIN);
-        // Tx 0: manually init FeeConfig + AdminCap
+        // Tx 0: manually init FeeConfig + AdminCap + AdminTimelock
         vault::init_for_testing(ctx(&mut s));
-        // Advance to tx 1: now take AdminCap + FeeConfig to set treasury
+        // Advance to tx 1: now take AdminCap + FeeConfig + Timelock to set treasury
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::set_treasury(&cap, &mut c, TREASURY);
+        vault::schedule_admin_action(&cap, &mut tl, 1, 0, TREASURY, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
         test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Still in tx 1 — caller advances
         s
@@ -61,6 +64,16 @@ module auto_renewal::vault_tests {
         test_scenario::return_shared(config);
     }
 
+    /// Take the shared AdminTimelock (must be returned with put_timelock).
+    fun get_timelock(s: &mut test_scenario::Scenario): AdminTimelock {
+        test_scenario::take_shared<AdminTimelock>(s)
+    }
+
+    /// Return the shared AdminTimelock.
+    fun put_timelock(s: &mut test_scenario::Scenario, tl: AdminTimelock) {
+        test_scenario::return_shared(tl);
+    }
+
     /// Create a vault in the CURRENT tx. Caller must be in right sender tx.
     fun mk_vault(s: &mut test_scenario::Scenario, config: &FeeConfig) {
         let mut sys = sys(ctx(s));
@@ -68,7 +81,7 @@ module auto_renewal::vault_tests {
             config,
             blob(&mut sys, 100, ctx(s)),
             wal(100_000_000, ctx(s)),
-            5, 10, option::none(), U, 0, ctx(s),
+            5, 10, 0, U, 0, ctx(s),
         );
         unit_test::destroy(sys);
     }
@@ -193,7 +206,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
-        vault::update_policy_fields(&config, &mut v, 3, 20, option::some(200), true, ctx(&mut s));
+        vault::update_policy_fields(&config, &mut v, 3, 20, 200, true, ctx(&mut s));
         test_scenario::return_shared(v);
         put_config(&mut s, config);
         next_tx(&mut s, U);
@@ -216,7 +229,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         put_config(&mut s, config);
         next_tx(&mut s, K);
@@ -248,7 +261,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
-        vault::update_policy_fields(&config, &mut v, 5, 10, option::none(), false, ctx(&mut s));
+        vault::update_policy_fields(&config, &mut v, 5, 10, 0, false, ctx(&mut s));
         test_scenario::return_shared(v);
         put_config(&mut s, config);
         next_tx(&mut s, K);
@@ -272,7 +285,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 200, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 200, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         put_config(&mut s, config);
         next_tx(&mut s, K);
@@ -287,23 +300,30 @@ module auto_renewal::vault_tests {
     }
 
     // ======================================================================
-    // Test 10: Insufficient Balance
+    // Test 10: Insufficient Balance — event emitted, policy deactivated
     // ======================================================================
     #[test]
-    #[expected_failure(abort_code = 4, location = auto_renewal::vault)]
     fun test_execute_renewal_insufficient_balance() {
         let mut s = init_env();
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(1_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(1_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         put_config(&mut s, config);
         next_tx(&mut s, K);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut sys2 = sys(ctx(&mut s));
+        // This should succeed (return, not abort) and deactivate the policy
         vault::execute_renewal(&mut v, &mut c, &mut sys2, ctx(&mut s));
+        // Verify the InsufficientBalance event was emitted and is queryable
+        let events = test_scenario::events<InsufficientBalance>(&s);
+        assert!(events.length() > 0, 50);
+        // Verify policy was deactivated
+        assert!(vault::policy_is_active(&vault::get_policy(&v)) == false, 40);
+        // Verify balance was NOT consumed (insufficient means no renewal)
+        assert!(vault::get_wal_balance(&v) == 1_000, 41);
         test_scenario::return_shared(c);
         test_scenario::return_shared(v);
         unit_test::destroy(sys2);
@@ -319,7 +339,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = get_config(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::some(55), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 55, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         put_config(&mut s, config);
         next_tx(&mut s, K);
@@ -351,7 +371,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, K);
         let config = get_config(&mut s);
         let mut v = test_scenario::take_shared<RenewalVault>(&mut s);
-        vault::update_policy_fields(&config, &mut v, 1, 1, option::none(), true, ctx(&mut s));
+        vault::update_policy_fields(&config, &mut v, 1, 1, 0, true, ctx(&mut s));
         test_scenario::return_shared(v);
         put_config(&mut s, config);
         end(s);
@@ -413,7 +433,7 @@ module auto_renewal::vault_tests {
             &config,
             blob(&mut sys, 100, ctx(&mut s)),
             wal(100_000_000, ctx(&mut s)),
-            5, 10, option::none(), K, 0, ctx(&mut s),
+            5, 10, 0, K, 0, ctx(&mut s),
         );
         unit_test::destroy(sys);
         put_config(&mut s, config);
@@ -461,7 +481,7 @@ module auto_renewal::vault_tests {
             &config,
             blob(&mut sys, 100, ctx(&mut s)),
             wal(100_000_000, ctx(&mut s)),
-            5, 10, option::none(), U, 2, ctx(&mut s),
+            5, 10, 0, U, 2, ctx(&mut s),
         );
         unit_test::destroy(sys);
         put_config(&mut s, config);
@@ -491,7 +511,7 @@ module auto_renewal::vault_tests {
             &config,
             blob(&mut sys, 100, ctx(&mut s)),
             wal(100_000_000, ctx(&mut s)),
-            5, 10, option::none(), U, 2, ctx(&mut s),
+            5, 10, 0, U, 2, ctx(&mut s),
         );
         unit_test::destroy(sys);
         put_config(&mut s, config);
@@ -543,11 +563,15 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
         let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::set_protocol_fee_bps(&cap, &mut c, 200);
-        vault::set_keeper_fee(&cap, &mut c, 2_000_000);
+        let mut tl = get_timelock(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 2, 200, @0x0, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        vault::schedule_admin_action(&cap, &mut tl, 3, 2_000_000, @0x0, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
         assert!(vault::protocol_fee_bps(&c) == 200, 70);
         assert!(vault::keeper_fee(&c) == 2_000_000, 71);
         assert!(vault::treasury_address(&c) == TREASURY, 72);
+        put_timelock(&mut s, tl);
         test_scenario::return_shared(c);
         test_scenario::return_to_sender(&mut s, cap);
         end(s);
@@ -565,7 +589,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         test_scenario::return_shared(config);
         next_tx(&mut s, K);
@@ -588,9 +612,9 @@ module auto_renewal::vault_tests {
         let mut s = init_env();
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
-        vault::set_protocol_fee_bps(&cap, &mut c, 20000);
-        test_scenario::return_shared(c);
+        let mut tl = get_timelock(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 2, 20000, @0x0, ctx(&mut s));
+        put_timelock(&mut s, tl);
         test_scenario::return_to_sender(&mut s, cap);
         end(s);
     }
@@ -631,7 +655,12 @@ module auto_renewal::vault_tests {
         let mut s = init_env();
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        vault::create_pauser_cap(&cap, OPERATOR, ctx(&mut s));
+        let mut tl = get_timelock(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        let mut c = get_config(&mut s);
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        put_config(&mut s, c);
+        put_timelock(&mut s, tl);
         test_scenario::return_to_sender(&mut s, cap);
         next_tx(&mut s, OPERATOR);
         let pcap = test_scenario::take_from_sender<PauserCap>(&mut s);
@@ -654,10 +683,15 @@ module auto_renewal::vault_tests {
     fun test_create_vault_fails_when_paused() {
         let mut s = test_scenario::begin(ADMIN);
         vault::init_for_testing(ctx(&mut s));
-        // Tx 1: ADMIN creates PauserCap for OPERATOR
+        // Tx 1: ADMIN creates PauserCap for OPERATOR (via timelock)
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        vault::create_pauser_cap(&cap, OPERATOR, ctx(&mut s));
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 2: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
@@ -670,7 +704,7 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 100, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 100, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         test_scenario::return_shared(config);
         unit_test::destroy(sys);
         end(s);
@@ -688,13 +722,18 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 50, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         test_scenario::return_shared(config);
-        // Tx 2: ADMIN creates PauserCap
+        // Tx 2: ADMIN creates PauserCap (via timelock)
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        vault::create_pauser_cap(&cap, OPERATOR, ctx(&mut s));
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 3: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
@@ -726,13 +765,18 @@ module auto_renewal::vault_tests {
         next_tx(&mut s, U);
         let config = test_scenario::take_shared<FeeConfig>(&mut s);
         let mut sys = sys(ctx(&mut s));
-        vault::create_vault(&config, blob(&mut sys, 100, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, option::none(), U, 0, ctx(&mut s));
+        vault::create_vault(&config, blob(&mut sys, 100, ctx(&mut s)), wal(100_000_000, ctx(&mut s)), 5, 10, 0, U, 0, ctx(&mut s));
         unit_test::destroy(sys);
         test_scenario::return_shared(config);
-        // Tx 2: ADMIN creates PauserCap
+        // Tx 2: ADMIN creates PauserCap (via timelock)
         next_tx(&mut s, ADMIN);
         let cap = test_scenario::take_from_sender<AdminCap>(&mut s);
-        vault::create_pauser_cap(&cap, OPERATOR, ctx(&mut s));
+        let mut tl = test_scenario::take_shared<AdminTimelock>(&mut s);
+        let mut c = test_scenario::take_shared<FeeConfig>(&mut s);
+        vault::schedule_admin_action(&cap, &mut tl, 5, 0, OPERATOR, ctx(&mut s));
+        vault::execute_admin_action(&mut tl, &mut c, ctx(&mut s));
+        test_scenario::return_shared(c);
+        test_scenario::return_shared(tl);
         test_scenario::return_to_sender(&mut s, cap);
         // Tx 3: OPERATOR pauses
         next_tx(&mut s, OPERATOR);
