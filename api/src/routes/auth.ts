@@ -193,31 +193,24 @@ router.post('/google',
       ).limit(1);
 
       if (!user) {
+        // New user creation requires the nonce-binding flow — without a nonce
+        // the zkLogin proof cannot be valid (no JWT nonce claim to verify
+        // against the ephemeral key). Existing users logging in again do not
+        // need a fresh proof — theirs is already stored.
+        if (!nonceFlowData) {
+          return c.json({ error: { message: 'New user registration requires nonce/zklogin/prepare flow', code: 'NONCE_REQUIRED' } }, 400);
+        }
+
         const salt = computeSalt(subject);
         const aud = GOOGLE_CLIENT_ID;
         const iss = getIssuer('google');
         const zkloginAddress = deriveZkLoginAddress(iss, subject, aud, salt);
 
-        let keypair: Ed25519Keypair;
-        let secretKey: string;
-        let jwtRandomness: string;
-        let ephemeralPublicKey: Uint8Array;
-        let userMaxEpoch: number;
-
-        if (nonceFlowData) {
-          keypair = nonceFlowData.keypair;
-          secretKey = Buffer.from(keypair.getSecretKey()).toString('hex');
-          jwtRandomness = nonceFlowData.jwtRandomness;
-          ephemeralPublicKey = getEphemeralPublicKey(keypair);
-          userMaxEpoch = nonceFlowData.maxEpoch;
-        } else {
-          const gen = generateEphemeralKeypair();
-          keypair = gen.keypair;
-          secretKey = gen.secretKey;
-          jwtRandomness = generateJwtRandomness();
-          ephemeralPublicKey = getEphemeralPublicKey(keypair);
-          userMaxEpoch = 0;
-        }
+        const keypair = nonceFlowData.keypair;
+        const secretKey = Buffer.from(keypair.getSecretKey()).toString('hex');
+        const jwtRandomness = nonceFlowData.jwtRandomness;
+        const ephemeralPublicKey = getEphemeralPublicKey(keypair);
+        const userMaxEpoch = nonceFlowData.maxEpoch;
 
         const encryptedKeypair = encrypt(secretKey);
 
@@ -228,9 +221,9 @@ router.post('/google',
             ephemeralPublicKey,
             jwtRandomness,
             salt,
+            userMaxEpoch,
           );
           zkProof = proofResult.proof;
-          userMaxEpoch = proofResult.maxEpoch;
         } catch (proofErr) {
           console.error('[auth] ZK proof generation failed (non-blocking):', proofErr);
         }

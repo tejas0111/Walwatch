@@ -77,6 +77,7 @@ export async function generateZkProof(
   ephemeralPublicKey: Uint8Array,
   jwtRandomness: string,
   salt: string,
+  maxEpoch: number,
 ): Promise<{ proof: any; maxEpoch: number }> {
   const proverUrl = config.zkProverUrl || 'https://prover.mystenlabs.com/v1';
 
@@ -86,6 +87,7 @@ export async function generateZkProof(
     body: JSON.stringify({
       jwt,
       extendedEphemeralPublicKey: Buffer.from(ephemeralPublicKey).toString('hex'),
+      maxEpoch: maxEpoch.toString(),
       jwtRandomness,
       salt,
       keyClaimName: 'sub',
@@ -98,12 +100,11 @@ export async function generateZkProof(
   }
 
   const result = await response.json();
-
-  const currentEpoch = result.maxEpoch || 0;
-  const maxEpoch = currentEpoch + 30;
-
+  // Real prover response: { proofPoints, issBase64Details, headerBase64 }
+  // Echo back the exact maxEpoch the caller committed to the nonce — do not
+  // derive one from the response, which has no such field.
   return {
-    proof: result.proof as any,
+    proof: result,
     maxEpoch,
   };
 }

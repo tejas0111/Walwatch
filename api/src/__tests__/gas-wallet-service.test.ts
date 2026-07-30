@@ -8,7 +8,8 @@ vi.mock('@mysten/sui/jsonRpc', () => {
   return { SuiJsonRpcClient: MockSuiJsonRpcClient };
 });
 
-const { selectGasCoin, GasObjectRef } = await import('../services/gas-wallet-service.js');
+const { selectGasCoin } = await import('../services/gas-wallet-service.js');
+
 const { SuiJsonRpcClient } = await import('@mysten/sui/jsonRpc');
 
 describe('selectGasCoin', () => {
